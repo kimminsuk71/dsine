@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DoubleSine - Pump-style Twin Tokens</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.0/dist/ethers.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; font-family: -apple-system, monospace; background: #0a0e1a; color: #e8eaed; }
+  h1 { margin: 0 0 8px; font-size: 22px; }
+  h2 { margin: 16px 0 8px; font-size: 14px; color: #88a; font-weight: normal; letter-spacing: 1px; text-transform: uppercase; }
+  .panel { background: #131829; border: 1px solid #1f2940; border-radius: 6px; padding: 16px; margin-bottom: 16px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .stat { display: inline-block; margin-right: 24px; font-family: 'SF Mono', Consolas, monospace; }
+  .stat-label { color: #88a; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-val   { color: #fff; font-size: 16px; }
+  .stat-val.a { color: #ff6b6b; }
+  .stat-val.b { color: #4ecdc4; }
+  button { background: #2a3654; color: #fff; border: 1px solid #3d4d75; padding: 8px 14px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 13px; margin-right: 6px; }
+  button:hover { background: #3a4570; }
+  button.buyA { background: #5b2a3a; border-color: #884050; }
+  button.buyA:hover { background: #6e3548; }
+  button.buyB { background: #1f4842; border-color: #2f6960; }
+  button.buyB:hover { background: #2a5e58; }
+  button.sellA, button.sellB { opacity: 0.7; }
+  .log { background: #0a0e1a; border: 1px solid #1f2940; border-radius: 4px; padding: 10px; font-family: 'SF Mono', Consolas, monospace; font-size: 11px; max-height: 200px; overflow-y: auto; }
+  .log-row { padding: 2px 0; }
+  .log-row.A { color: #ff6b6b; }
+  .log-row.B { color: #4ecdc4; }
+  canvas { max-width: 100%; }
+  input { background: #0a0e1a; color: #fff; border: 1px solid #2a3654; padding: 6px 10px; border-radius: 4px; font-family: inherit; width: 100px; }
+  .mode-pill { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; background: #2a3654; color: #fff; }
+  .mode-pill.live { background: #2f6960; }
+</style>
+</head>
+<body>
+
+<h1>DoubleSine <span class="mode-pill" id="mode">Simulation</span></h1>
+<div style="color:#88a; font-size:12px; margin-bottom:16px;">
+  Twin tokens DSA &amp; DSB. Their prices are locked to be equal at every block - any trade on either side
+  moves both prices identically. No external pool can exist for these tokens, so arbitrage is impossible.
+</div>
+
+<div class="panel">
+  <h2>Live state</h2>
+  <div class="stat"><div class="stat-label">priceA</div><div class="stat-val a" id="priceA">0.000001</div></div>
+  <div class="stat"><div class="stat-label">priceB</div><div class="stat-val b" id="priceB">0.000001</div></div>
+  <div class="stat"><div class="stat-label">reserve (ETH)</div><div class="stat-val" id="reserve">0</div></div>
+  <div class="stat"><div class="stat-label">supply A / B</div><div class="stat-val" id="supplies">0 / 0</div></div>
+  <div class="stat"><div class="stat-label">swaps</div><div class="stat-val" id="swaps">0</div></div>
+</div>
+
+<div class="panel">
+  <h2>Controls</h2>
+  <div style="margin-bottom:10px;">
+    ETH amount: <input id="eth" type="number" step="0.001" value="0.05">
+    <button class="buyA" onclick="action('buy', 'A')">Buy A</button>
+    <button class="buyB" onclick="action('buy', 'B')">Buy B</button>
+    <button class="sellA" onclick="action('sell', 'A')">Sell A</button>
+    <button class="sellB" onclick="action('sell', 'B')">Sell B</button>
+    <button onclick="reset()">Reset</button>
+    <button onclick="autoSim(30)">Auto +30</button>
+    <button onclick="autoSim(100)">Auto +100</button>
+    <button onclick="autoSim(300)">Pump demo (+300)</button>
+  </div>
+  <div style="font-size:11px; color:#88a;">
+    Trades on either side move both prices in lockstep. The price you see on A is always the same as the price on B.
+  </div>
+</div>
+
+<div class="grid">
+  <div class="panel">
+    <h2>Price over time (A and B overlap)</h2>
+    <canvas id="chartTime" height="240"></canvas>
+  </div>
+  <div class="panel">
+    <h2>Bonding curve - current position</h2>
+    <canvas id="chartCurve" height="240"></canvas>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>Event log</h2>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+// ============================================================
+// Constants - must match DoubleSineMath.sol
+// ============================================================
+const VIRTUAL_ETH_INIT   = 1.0;
+const VIRTUAL_TOKEN_INIT = 1e6;
+const K = VIRTUAL_ETH_INIT * VIRTUAL_TOKEN_INIT;  // 1e6 in these units
+const BUY_FEE_BPS  = 100;
+const SELL_FEE_BPS = 100;
+
+// ============================================================
+// Math - mirror of the on-chain library.
+// Both A and B read from the same virtualEth, so priceA == priceB.
+// ============================================================
+const spotPrice       = (vE) => (vE * vE) / K;
+const priceA          = (vE) => spotPrice(vE);
+const priceB          = (vE) => spotPrice(vE);
+const tokensOutForEth = (vE, ethIn) => (K * ethIn) / (vE * (vE + ethIn));
+const ethOutForTokens = (vE, tokensIn) => {
+  const newVT = K / vE + tokensIn;
+  const newVE = K / newVT;
+  return vE - newVE;
+};
+
+// ============================================================
+// State
+// ============================================================
+const state = {
+  virtualEth: VIRTUAL_ETH_INIT,
+  ethReserve: 0,
+  balA: 0,
+  balB: 0,
+  supplyA: 0,
+  supplyB: 0,
+  events: [],
+  series: [],
+};
+
+function reset() {
+  state.virtualEth = VIRTUAL_ETH_INIT;
+  state.ethReserve = 0;
+  state.balA = 0;
+  state.balB = 0;
+  state.supplyA = 0;
+  state.supplyB = 0;
+  state.events = [];
+  state.series = [{ step: 0, vE: VIRTUAL_ETH_INIT, pA: spotPrice(VIRTUAL_ETH_INIT), pB: spotPrice(VIRTUAL_ETH_INIT) }];
+  redraw();
+}
+
+function action(kind, side) {
+  const eth = parseFloat(document.getElementById('eth').value) || 0.01;
+
+  if (kind === 'buy') {
+    const fee = eth * (BUY_FEE_BPS / 10000);
+    const ethCurve = eth - fee;
+    const tokensOut = tokensOutForEth(state.virtualEth, ethCurve);
+    state.virtualEth += ethCurve;
+    state.ethReserve += eth;
+    if (side === 'A') { state.balA += tokensOut; state.supplyA += tokensOut; }
+    else              { state.balB += tokensOut; state.supplyB += tokensOut; }
+    state.events.unshift({ side, kind, eth, tokens: tokensOut, vE: state.virtualEth, px: spotPrice(state.virtualEth) });
+  } else {
+    const bal = side === 'A' ? state.balA : state.balB;
+    if (bal <= 0) { logRow(`No ${side} balance to sell`); return; }
+    const sellAmt = bal / 5; // 20% per click
+    const ethGross = ethOutForTokens(state.virtualEth, sellAmt);
+    const fee = ethGross * (SELL_FEE_BPS / 10000);
+    const ethOut = ethGross - fee;
+    if (ethOut > state.ethReserve) { logRow(`Reserve too low for ${side} sell`); return; }
+    state.virtualEth -= ethGross;
+    state.ethReserve -= ethOut;
+    if (side === 'A') { state.balA -= sellAmt; state.supplyA -= sellAmt; }
+    else              { state.balB -= sellAmt; state.supplyB -= sellAmt; }
+    state.events.unshift({ side, kind, eth: ethOut, tokens: sellAmt, vE: state.virtualEth, px: spotPrice(state.virtualEth) });
+  }
+  state.series.push({
+    step: state.series.length,
+    vE: state.virtualEth,
+    pA: spotPrice(state.virtualEth),
+    pB: spotPrice(state.virtualEth),
+  });
+  redraw();
+}
+
+function autoSim(n) {
+  for (let i = 0; i < n; i++) {
+    const r = Math.random();
+    if      (r < 0.40) action('buy', 'A');
+    else if (r < 0.80) action('buy', 'B');
+    else if (r < 0.90) action('sell', 'A');
+    else               action('sell', 'B');
+  }
+}
+
+// ============================================================
+// Charts
+// ============================================================
+const chartTime = new Chart(document.getElementById('chartTime'), {
+  type: 'line',
+  data: {
+    labels: [0],
+    datasets: [
+      { label: 'priceA', data: [spotPrice(VIRTUAL_ETH_INIT)], borderColor: '#ff6b6b', backgroundColor: 'transparent', pointRadius: 0, tension: 0.3, borderWidth: 3 },
+      { label: 'priceB', data: [spotPrice(VIRTUAL_ETH_INIT)], borderColor: '#4ecdc4', backgroundColor: 'transparent', pointRadius: 0, tension: 0.3, borderWidth: 1.5, borderDash: [3, 3] },
+    ],
+  },
+  options: {
+    responsive: true,
+    animation: false,
+    plugins: { legend: { labels: { color: '#fff' } }, title: { display: true, text: 'priceB dashed for visibility - they overlap exactly', color: '#88a', font: { size: 11 } } },
+    scales: {
+      x: { title: { display: true, text: 'swap #', color: '#88a' }, ticks: { color: '#88a' }, grid: { color: '#1f2940' } },
+      y: { title: { display: true, text: 'price (ETH)', color: '#88a' }, ticks: { color: '#88a' }, grid: { color: '#1f2940' } },
+    },
+  },
+});
+
+const chartCurve = new Chart(document.getElementById('chartCurve'), {
+  type: 'line',
+  data: {
+    datasets: [
+      { label: 'curve', data: [], borderColor: '#88aaff', backgroundColor: 'transparent', showLine: true, pointRadius: 0, borderWidth: 2, tension: 0 },
+      { label: 'current', data: [{ x: VIRTUAL_ETH_INIT, y: spotPrice(VIRTUAL_ETH_INIT) }], borderColor: '#ffd166', backgroundColor: '#ffd166', pointRadius: 6, pointStyle: 'circle', showLine: false },
+    ],
+  },
+  options: {
+    responsive: true,
+    animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { type: 'linear', title: { display: true, text: 'cumulative ETH in', color: '#88a' }, ticks: { color: '#88a' }, grid: { color: '#1f2940' } },
+      y: { type: 'linear', title: { display: true, text: 'price (ETH/token)', color: '#88a' }, ticks: { color: '#88a' }, grid: { color: '#1f2940' } },
+    },
+  },
+});
+
+function redraw() {
+  const px = spotPrice(state.virtualEth);
+  document.getElementById('priceA').textContent   = px.toExponential(4);
+  document.getElementById('priceB').textContent   = px.toExponential(4);
+  document.getElementById('reserve').textContent  = state.ethReserve.toFixed(4);
+  document.getElementById('supplies').textContent = `${Math.round(state.supplyA).toLocaleString()} / ${Math.round(state.supplyB).toLocaleString()}`;
+  document.getElementById('swaps').textContent    = state.series.length - 1;
+
+  chartTime.data.labels = state.series.map(s => s.step);
+  chartTime.data.datasets[0].data = state.series.map(s => s.pA);
+  chartTime.data.datasets[1].data = state.series.map(s => s.pB);
+  chartTime.update('none');
+
+  // Curve plot: sample the parabolic curve from min(vE) to max(vE), then dot the current state.
+  const vMin = VIRTUAL_ETH_INIT * 0.9;
+  const vMax = Math.max(state.virtualEth * 1.1, VIRTUAL_ETH_INIT * 1.5);
+  const curve = [];
+  const N = 80;
+  for (let i = 0; i <= N; i++) {
+    const v = vMin + (vMax - vMin) * (i / N);
+    curve.push({ x: v, y: spotPrice(v) });
+  }
+  chartCurve.data.datasets[0].data = curve;
+  chartCurve.data.datasets[1].data = [{ x: state.virtualEth, y: px }];
+  chartCurve.update('none');
+
+  const logEl = document.getElementById('log');
+  logEl.innerHTML = state.events.slice(0, 30).map(e => {
+    const op = `${e.kind} ${e.side}`;
+    const detail = e.kind === 'buy'
+      ? `${e.eth.toFixed(5)} ETH -> ${Math.round(e.tokens).toLocaleString()} DS${e.side}`
+      : `${Math.round(e.tokens).toLocaleString()} DS${e.side} -> ${e.eth.toFixed(5)} ETH`;
+    return `<div class="log-row ${e.side}">${op.padEnd(8)} ${detail.padEnd(40)} vE=${e.vE.toFixed(4)}  px=${e.px.toExponential(3)}</div>`;
+  }).join('');
+}
+
+function logRow(msg) {
+  const logEl = document.getElementById('log');
+  const row = document.createElement('div');
+  row.className = 'log-row';
+  row.textContent = msg;
+  logEl.prepend(row);
+}
+
+// ============================================================
+// Boot - auto-run a moderate amount of trading so the curve is visible.
+// ============================================================
+reset();
+setTimeout(() => autoSim(150), 50);
+</script>
+
+</body>
+</html>

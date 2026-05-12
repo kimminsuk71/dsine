@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Install Solidity deps
+        run: forge install Uniswap/v4-core --no-commit
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Test
+        run: forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"

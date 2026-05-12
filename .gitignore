@@ -1,0 +1,28 @@
+# Foundry build artifacts
+out/
+cache/
+broadcast/
+
+# Installed dependencies (use `forge install` to populate)
+lib/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Node (only if a JS toolchain is added later)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Forge coverage
+lcov.info
+coverage/
