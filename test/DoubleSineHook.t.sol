@@ -271,7 +271,7 @@ contract DoubleSineHookTest is Test {
         // a v2 Pair or rogue LP contract.
         FakeRouter fake = new FakeRouter();
 
-        vm.prank(user);
+        vm.prank(user, user);
         vm.expectRevert(DoubleSineToken.TransferToUnauthorizedContract.selector);
         // forge-lint: disable-next-line(erc20-unchecked-transfer)
         tokenA.transfer(address(fake), bal);
@@ -283,7 +283,7 @@ contract DoubleSineHookTest is Test {
 
         address friend = address(0xDEAD);
         require(friend.code.length == 0, "friend should be EOA");
-        vm.prank(user);
+        vm.prank(user, user);
         bool ok = tokenA.transfer(friend, bal / 2);
         assertTrue(ok, "transfer should return true");
         assertEq(tokenA.balanceOf(friend), bal / 2, "EOA-to-EOA transfer should work");
@@ -293,28 +293,66 @@ contract DoubleSineHookTest is Test {
         _buyA(user, 0.01 ether);
         uint256 bal = tokenA.balanceOf(user);
 
-        vm.prank(user);
+        vm.prank(user, user);
         vm.expectRevert(DoubleSineToken.TransferToUnauthorizedContract.selector);
         // forge-lint: disable-next-line(erc20-unchecked-transfer)
         tokenA.transfer(address(manager), bal / 2);
     }
 
-    function test_noArb_unauthorizedContractCannotTransferOutAfterConstructorReceive() public {
+    function test_noArb_constructorCannotPullTokens() public {
+        _buyA(user, 0.01 ether);
+        uint256 balanceBefore = tokenA.balanceOf(user);
+        uint256 amount = balanceBefore / 2;
+
+        uint64 nonce = vm.getNonce(user);
+        address predictedVault = vm.computeCreateAddress(user, nonce);
+
+        vm.startPrank(user, user);
+        tokenA.approve(predictedVault, amount);
+        vm.expectRevert(DoubleSineToken.UnauthorizedContractCaller.selector);
+        new ConstructorTokenVault(tokenA, amount);
+        vm.stopPrank();
+
+        assertEq(tokenA.balanceOf(user), balanceBefore, "constructor pull must revert");
+        assertEq(tokenA.balanceOf(predictedVault), 0, "vault must not receive tokens");
+    }
+
+    function test_noArb_constructorCannotApproveForwarderForCounterfactualBalance() public {
         _buyA(user, 0.01 ether);
         uint256 amount = tokenA.balanceOf(user) / 2;
 
         uint64 nonce = vm.getNonce(user);
         address predictedVault = vm.computeCreateAddress(user, nonce);
 
-        vm.startPrank(user);
-        tokenA.approve(predictedVault, amount);
-        ConstructorTokenVault vault = new ConstructorTokenVault(tokenA, amount);
+        vm.prank(user, user);
+        assertTrue(tokenA.transfer(predictedVault, amount), "counterfactual transfer");
+        assertEq(tokenA.balanceOf(predictedVault), amount, "counterfactual receive setup failed");
+
+        vm.startPrank(user, user);
+        vm.expectRevert(DoubleSineToken.UnauthorizedContractCaller.selector);
+        new ConstructorApprovalVault(tokenA, address(router), amount);
+        vm.stopPrank();
+
+        assertEq(tokenA.allowance(predictedVault, address(router)), 0, "constructor approve must revert");
+        assertEq(tokenA.balanceOf(predictedVault), amount, "counterfactual balance should remain stuck");
+    }
+
+    function test_noArb_unauthorizedContractCannotTransferOutAfterCounterfactualReceive() public {
+        _buyA(user, 0.01 ether);
+        uint256 amount = tokenA.balanceOf(user) / 2;
+
+        uint64 nonce = vm.getNonce(user);
+        address predictedVault = vm.computeCreateAddress(user, nonce);
+
+        vm.startPrank(user, user);
+        assertTrue(tokenA.transfer(predictedVault, amount), "counterfactual transfer");
+        PassiveTokenVault vault = new PassiveTokenVault(tokenA);
         vm.stopPrank();
 
         assertEq(address(vault), predictedVault, "unexpected vault address");
         assertEq(tokenA.balanceOf(address(vault)), amount, "constructor receive setup failed");
 
-        vm.expectRevert(DoubleSineToken.TransferFromUnauthorizedContract.selector);
+        vm.expectRevert(DoubleSineToken.UnauthorizedContractCaller.selector);
         vault.drain(address(0xCAFE));
     }
 
@@ -411,6 +449,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function test_transferFromZeroAddressRevertsEvenForZeroAmount() public {
+        vm.prank(user, user);
         vm.expectRevert(DoubleSineToken.ZeroAddress.selector);
         // forge-lint: disable-next-line(erc20-unchecked-transfer)
         tokenA.transferFrom(address(0), user, 0);
@@ -538,7 +577,7 @@ contract DoubleSineHookTest is Test {
         PoolKey memory badKey = keyA;
         badKey.hooks = IHooks(address(0));
 
-        vm.startPrank(user);
+        vm.startPrank(user, user);
         tokenA.approve(address(router), amount);
         vm.expectRevert(DoubleSineRouter.UnsupportedPool.selector);
         router.swap(
@@ -635,7 +674,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function _buyA(address buyer, uint256 amount) internal returns (BalanceDelta) {
-        vm.prank(buyer);
+        vm.prank(buyer, buyer);
         return router.swap{value: amount}(
             keyA,
             SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
@@ -644,7 +683,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function _buyB(address buyer, uint256 amount) internal returns (BalanceDelta) {
-        vm.prank(buyer);
+        vm.prank(buyer, buyer);
         return router.swap{value: amount}(
             keyB,
             SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
@@ -653,7 +692,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function _sellA(address seller, uint256 amount) internal returns (BalanceDelta) {
-        vm.startPrank(seller);
+        vm.startPrank(seller, seller);
         tokenA.approve(address(router), amount);
         BalanceDelta delta = router.swap(
             keyA,
@@ -665,7 +704,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function _sellB(address seller, uint256 amount) internal returns (BalanceDelta) {
-        vm.startPrank(seller);
+        vm.startPrank(seller, seller);
         tokenB.approve(address(router), amount);
         BalanceDelta delta = router.swap(
             keyB,
@@ -685,7 +724,7 @@ contract DoubleSineHookTest is Test {
     /// Used to test the anti-sniper cap without relying on vm.expectRevert
     /// (the router's unlock-callback wrapping can confuse it).
     function _tryBuyA(address buyer, uint256 amount) internal returns (bool) {
-        vm.prank(buyer);
+        vm.prank(buyer, buyer);
         try router.swap{value: amount}(
             keyA,
             SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
@@ -698,7 +737,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function _tryBuyB(address buyer, uint256 amount) internal returns (bool) {
-        vm.prank(buyer);
+        vm.prank(buyer, buyer);
         try router.swap{value: amount}(
             keyB,
             SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
@@ -715,7 +754,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function _tryBuyWithRawHookData(address buyer, uint256 amount, bytes memory hookData) internal returns (bool) {
-        vm.prank(buyer);
+        vm.prank(buyer, buyer);
         try router.swap{value: amount}(
             keyA,
             SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
@@ -728,7 +767,7 @@ contract DoubleSineHookTest is Test {
     }
 
     function _trySellWithSlippage(address seller, uint256 amount, uint256 minOut) internal returns (bool) {
-        vm.startPrank(seller);
+        vm.startPrank(seller, seller);
         tokenA.approve(address(router), amount);
         try router.swap(
             keyA,
@@ -782,5 +821,25 @@ contract ConstructorTokenVault {
     function drain(address to) external {
         bool ok = token.transfer(to, token.balanceOf(address(this)));
         require(ok, "transfer failed");
+    }
+}
+
+contract PassiveTokenVault {
+    DoubleSineToken public immutable token;
+
+    constructor(DoubleSineToken token_) {
+        token = token_;
+    }
+
+    function drain(address to) external {
+        bool ok = token.transfer(to, token.balanceOf(address(this)));
+        require(ok, "transfer failed");
+    }
+}
+
+contract ConstructorApprovalVault {
+    constructor(DoubleSineToken token, address spender, uint256 amount) {
+        bool ok = token.approve(spender, amount);
+        require(ok, "approve failed");
     }
 }

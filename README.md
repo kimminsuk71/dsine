@@ -65,7 +65,7 @@ forge build
 forge test
 ```
 
-You should see **53 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **51 tests passing**:
+You should see **57 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **55 tests passing**:
 
 ```bash
 forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"
@@ -103,6 +103,8 @@ forge script script/DeployDoubleSine.s.sol \
 | `PERMIT2` | unset | Optional token auth entry for integrations that custody/forward tokens. Does not permit direct PoolManager deposits. |
 | `UNIVERSAL_ROUTER` | unset | Optional token auth entry for integrations that custody/forward tokens. Direct v4 PoolManager deposits remain blocked. |
 
+Optional auth entries must already have deployed code. EOA or future-contract addresses are rejected at token construction.
+
 ## Frontend
 
 Local visualizer (simulation mode, no contract needed):
@@ -134,11 +136,11 @@ These trade-offs are how the no-external-venue property is enforced. The canonic
 ## Security
 
 - **Reentrancy**: hook never makes external calls before state writes; PoolManager doesn't callback into the hook from take/settle.
-- **No-arb gate**: enforced at `_transfer` via contract-code checks on both `from` and `to`. Deployed contracts must be in the locked authorization list; only `bindHook` can add the hook itself, once.
+- **No-arb gate**: enforced at `_transfer` via contract-code checks on both `from` and `to`, plus a caller guard that rejects unapproved contract callers. Deployed contracts must be in the locked authorization list; only `bindHook` can add the hook itself, once.
 - **Router key gate**: `DoubleSineRouter` is one-time bound to tokenA/tokenB plus the canonical hook and rejects non-canonical PoolKeys before pulling user tokens.
 - **Hook binding guard**: token and router binding reject hook addresses without deployed code and verify the hook's `manager/tokenA/tokenB` getters match the system being bound.
 - **PoolManager singleton guard**: v4 PoolManager is authorized for canonical settlement, but token deposits into PoolManager are only accepted from this system's bound router or hook. This blocks alternate v4 pools from being seeded with DSA/DSB.
-- **Code-length caveat**: the EVM cannot distinguish an EOA from an address that will deploy code in the future. Such an address can receive while it has no code, but once code exists it cannot move tokens unless authorized.
+- **Code-length caveat**: the EVM cannot distinguish an EOA from an address that will deploy code in the future. Such an address can receive while it has no code, but constructor-time approvals/transfers and post-deploy movement are blocked unless the caller is authorized.
 - **Mint authority**: `onlyHook` modifier + target check (`to == hook`) — even a buggy hook can't mint to arbitrary addresses.
 - **Reserve invariant**: `address(hook).balance >= ethReserve` always holds. The accounting allows orphan ETH (direct donations) without breaking sells.
 - **Anti-sniper**: 5-block window enforces 0.001 ETH cap on per-swap buys. Both pools share one bootstrap anchor.

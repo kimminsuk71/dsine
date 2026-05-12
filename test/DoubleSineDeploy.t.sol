@@ -114,6 +114,46 @@ contract DoubleSineDeployTest is Test {
         );
     }
 
+    function test_tokenConstructorRejectsAuthorizedAddressWithoutCode() public {
+        PoolManager manager = new PoolManager(address(this));
+        DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](1);
+        auth[0] = makeAddr("future-contract");
+
+        vm.expectRevert(DoubleSineToken.AuthorizedMustHaveCode.selector);
+        new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
+    }
+
+    function test_atomicLaunchRejectsAuthorizedAddressWithoutCode() public {
+        PoolManager manager = new PoolManager(address(this));
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+        address beneficiary = makeAddr("beneficiary");
+
+        address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
+        address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
+        bytes memory ctorArgs = abi.encode(
+            IPoolManager(address(manager)),
+            DoubleSineToken(predictedTokenA),
+            DoubleSineToken(predictedTokenB),
+            address(launcher)
+        );
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+
+        vm.expectRevert(DoubleSineToken.AuthorizedMustHaveCode.selector);
+        launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                permit2: makeAddr("fake-permit2"),
+                universalRouter: address(0),
+                beneficiary: beneficiary,
+                hookSalt: salt,
+                expectedHook: expectedHook,
+                firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
+            })
+        );
+    }
+
     function test_fullDeploymentFlow() public {
         // ============================================================
         // 1. Bedrock contracts

@@ -46,8 +46,10 @@ contract DoubleSineToken {
     error InsufficientBalance();
     error InsufficientAllowance();
     error ZeroAddress();
+    error AuthorizedMustHaveCode();
     error HookMustHaveCode();
     error InvalidHookBinding();
+    error UnauthorizedContractCaller();
     error TransferFromUnauthorizedContract();
     error TransferToUnauthorizedContract();
 
@@ -70,6 +72,7 @@ contract DoubleSineToken {
         emit Authorized(router_);
         for (uint256 i = 0; i < authorized_.length; i++) {
             if (authorized_[i] == address(0)) revert ZeroAddress();
+            if (authorized_[i].code.length == 0) revert AuthorizedMustHaveCode();
             isAuthorized[authorized_[i]] = true;
             emit Authorized(authorized_[i]);
         }
@@ -98,6 +101,7 @@ contract DoubleSineToken {
     }
 
     function approve(address spender, uint256 amount) external returns (bool) {
+        _requireEOAOrAuthorizedCaller();
         allowance[msg.sender][spender] = amount;
         emit Approval(msg.sender, spender, amount);
         return true;
@@ -145,6 +149,7 @@ contract DoubleSineToken {
     function _transfer(address from, address to, uint256 amount) internal {
         if (from == address(0)) revert ZeroAddress();
         if (to == address(0)) revert ZeroAddress();
+        _requireEOAOrAuthorizedCaller();
         // v4 PoolManager is a singleton shared by every v4 pool. Keep it
         // authorized for canonical settlement, but only let this system's
         // router/hook push tokens into it; otherwise anyone could seed an
@@ -169,6 +174,15 @@ contract DoubleSineToken {
             balanceOf[to] += amount;
         }
         emit Transfer(from, to, amount);
+    }
+
+    function _requireEOAOrAuthorizedCaller() private view {
+        if (isAuthorized[msg.sender]) return;
+        // This is not an ownership check. It blocks contract and in-constructor
+        // callers from abusing the EOA code-length exception in the transfer gate.
+        // slither-disable-next-line tx-origin
+        // solhint-disable-next-line avoid-tx-origin
+        if (msg.sender != tx.origin) revert UnauthorizedContractCaller();
     }
 
     function _readHookBinding(address hook_)
