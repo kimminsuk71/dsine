@@ -96,12 +96,19 @@ contract DoubleSineHook is IHooks {
     error Slippage();
     error InvalidHookData();
     error Int128Overflow();
+    error ExactInputOverflow();
+    error SystemAddressMustHaveCode();
 
     constructor(IPoolManager manager_, DoubleSineToken tokenA_, DoubleSineToken tokenB_, address initializer_) {
         if (
             address(manager_) == address(0) || address(tokenA_) == address(0) || address(tokenB_) == address(0)
                 || initializer_ == address(0)
         ) revert ZeroAddress();
+        if (
+            address(manager_).code.length == 0 || address(tokenA_).code.length == 0 || address(tokenB_).code.length == 0
+        ) {
+            revert SystemAddressMustHaveCode();
+        }
         if (address(tokenA_) == address(tokenB_)) revert DuplicateToken();
         manager = manager_;
         tokenA = tokenA_;
@@ -221,6 +228,7 @@ contract DoubleSineHook is IHooks {
     {
         bool isA = _classifyPool(key);
         if (params.amountSpecified >= 0) revert ExactOutputDisabled();
+        if (params.amountSpecified == type(int256).min) revert ExactInputOverflow();
         uint256 amountIn = uint256(-params.amountSpecified);
 
         // Optional slippage protection: hookData carries one uint256

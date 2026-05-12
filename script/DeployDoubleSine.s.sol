@@ -128,6 +128,7 @@ contract AtomicDoubleSineDeployer {
     uint160 internal constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     uint160 internal constant MIN_PRICE_LIMIT = TickMath.MIN_SQRT_PRICE + 1;
     uint256 internal constant ANTI_SNIPE_MAX_BUY_WEI = 0.001 ether;
+    address public immutable owner;
 
     struct LaunchParams {
         address poolManager;
@@ -158,11 +159,17 @@ contract AtomicDoubleSineDeployer {
     error FirstBuyFailed();
     error TokenTransferFailed();
     error EthTransferFailed();
+    error OnlyOwner();
 
     receive() external payable {}
 
+    constructor() {
+        owner = msg.sender;
+    }
+
     // slither-disable-next-line cyclomatic-complexity
     function launch(LaunchParams calldata params) external payable returns (Deployment memory deployment) {
+        if (msg.sender != owner) revert OnlyOwner();
         if (params.poolManager == address(0) || params.beneficiary == address(0)) revert ZeroAddress();
         if (params.firstBuyWei > ANTI_SNIPE_MAX_BUY_WEI) revert FirstBuyTooLarge();
         if (msg.value < params.firstBuyWei * 2) revert InsufficientEth();

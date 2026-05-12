@@ -47,6 +47,7 @@ contract DoubleSineToken {
     error InsufficientAllowance();
     error ZeroAddress();
     error AuthorizedMustHaveCode();
+    error SystemAddressMustHaveCode();
     error HookMustHaveCode();
     error InvalidHookBinding();
     error UnauthorizedContractCaller();
@@ -61,6 +62,7 @@ contract DoubleSineToken {
         address[] memory authorized_
     ) {
         if (poolManager_ == address(0) || router_ == address(0)) revert ZeroAddress();
+        if (poolManager_.code.length == 0 || router_.code.length == 0) revert SystemAddressMustHaveCode();
         name = name_;
         symbol = symbol_;
         poolManager = poolManager_;

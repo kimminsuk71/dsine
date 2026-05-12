@@ -492,6 +492,27 @@ contract DoubleSineHookTest is Test {
         assertTrue(reverted, "slippage check should have reverted");
     }
 
+    function test_routerRejectsInt256MinExactInput() public {
+        vm.prank(user);
+        vm.expectRevert(DoubleSineRouter.InvalidCallback.selector);
+        router.swap(
+            keyA,
+            SwapParams({zeroForOne: true, amountSpecified: type(int256).min, sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            ""
+        );
+    }
+
+    function test_hookRejectsInt256MinExactInput() public {
+        vm.prank(address(manager));
+        vm.expectRevert(DoubleSineHook.ExactInputOverflow.selector);
+        hook.beforeSwap(
+            address(router),
+            keyA,
+            SwapParams({zeroForOne: true, amountSpecified: type(int256).min, sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            ""
+        );
+    }
+
     // ============================================================
     // Anti-sniper: per-swap input cap during the first N blocks
     // ============================================================

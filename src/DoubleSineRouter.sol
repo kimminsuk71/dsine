@@ -57,9 +57,11 @@ contract DoubleSineRouter is IUnlockCallback {
     error SettleFailed();
     error EthTransferFailed();
     error TokenTransferFailed();
+    error SystemAddressMustHaveCode();
 
     constructor(IPoolManager manager_) {
         if (address(manager_) == address(0)) revert ZeroAddress();
+        if (address(manager_).code.length == 0) revert SystemAddressMustHaveCode();
         manager = manager_;
         binder = msg.sender;
     }
@@ -94,9 +96,7 @@ contract DoubleSineRouter is IUnlockCallback {
         payable
         returns (BalanceDelta delta)
     {
-        if (params.amountSpecified >= 0) revert InvalidCallback();
-        // forge-lint: disable-next-line(unsafe-typecast)
-        uint256 amountIn = uint256(-params.amountSpecified);
+        uint256 amountIn = _exactInputAmount(params.amountSpecified);
 
         DoubleSineToken token = _tokenFromKey(key);
 
@@ -124,20 +124,17 @@ contract DoubleSineRouter is IUnlockCallback {
         if (msg.sender != address(manager)) revert OnlyPoolManager();
 
         CallbackData memory data = abi.decode(rawData, (CallbackData));
-        if (data.params.amountSpecified >= 0) revert InvalidCallback();
+        uint256 amountIn = _exactInputAmount(data.params.amountSpecified);
         DoubleSineToken token = _tokenFromKey(data.key);
 
         if (data.params.zeroForOne) {
             // Buy: pay ETH (currency0) up front, then trigger swap.
-            // forge-lint: disable-next-line(unsafe-typecast)
-            if (data.value != uint256(-data.params.amountSpecified)) revert InvalidCallback();
+            if (data.value != amountIn) revert InvalidCallback();
             if (manager.settle{value: data.value}() != data.value) revert SettleFailed();
         } else {
             // Sell: tokens were already pulled from the caller before unlock;
             // settle the router-held tokens with the manager.
             if (data.value != 0) revert InvalidCallback();
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint256 amountIn = uint256(-data.params.amountSpecified);
             manager.sync(data.key.currency1);
             if (!token.transfer(address(manager), amountIn)) revert TokenTransferFailed();
             if (manager.settle() != amountIn) revert SettleFailed();
@@ -181,6 +178,12 @@ contract DoubleSineRouter is IUnlockCallback {
         // slither-disable-next-line low-level-calls
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert EthTransferFailed();
+    }
+
+    function _exactInputAmount(int256 amountSpecified) internal pure returns (uint256) {
+        if (amountSpecified >= 0 || amountSpecified == type(int256).min) revert InvalidCallback();
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint256(-amountSpecified);
     }
 
     function _readHookBinding(address hook_)

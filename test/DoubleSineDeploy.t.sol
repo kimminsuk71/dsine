@@ -124,6 +124,34 @@ contract DoubleSineDeployTest is Test {
         new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
     }
 
+    function test_tokenConstructorRejectsSystemAddressWithoutCode() public {
+        PoolManager manager = new PoolManager(address(this));
+        DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](0);
+
+        vm.expectRevert(DoubleSineToken.SystemAddressMustHaveCode.selector);
+        new DoubleSineToken("DoubleSine A", "DSA", makeAddr("fake-manager"), address(router), auth);
+
+        vm.expectRevert(DoubleSineToken.SystemAddressMustHaveCode.selector);
+        new DoubleSineToken("DoubleSine A", "DSA", address(manager), makeAddr("fake-router"), auth);
+    }
+
+    function test_routerConstructorRejectsManagerWithoutCode() public {
+        vm.expectRevert(DoubleSineRouter.SystemAddressMustHaveCode.selector);
+        new DoubleSineRouter(IPoolManager(makeAddr("fake-manager")));
+    }
+
+    function test_hookConstructorRejectsSystemAddressWithoutCode() public {
+        PoolManager manager = new PoolManager(address(this));
+        DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](0);
+        DoubleSineToken token = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
+        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router), auth);
+
+        vm.expectRevert(DoubleSineHook.SystemAddressMustHaveCode.selector);
+        new DoubleSineHook(IPoolManager(makeAddr("fake-manager")), token, tokenB, address(this));
+    }
+
     function test_atomicLaunchRejectsAuthorizedAddressWithoutCode() public {
         PoolManager manager = new PoolManager(address(this));
         AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
@@ -145,6 +173,38 @@ contract DoubleSineDeployTest is Test {
             AtomicDoubleSineDeployer.LaunchParams({
                 poolManager: address(manager),
                 permit2: makeAddr("fake-permit2"),
+                universalRouter: address(0),
+                beneficiary: beneficiary,
+                hookSalt: salt,
+                expectedHook: expectedHook,
+                firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
+            })
+        );
+    }
+
+    function test_atomicLaunchOnlyOwnerCanLaunch() public {
+        PoolManager manager = new PoolManager(address(this));
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+        address beneficiary = makeAddr("beneficiary");
+
+        address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
+        address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
+        bytes memory ctorArgs = abi.encode(
+            IPoolManager(address(manager)),
+            DoubleSineToken(predictedTokenA),
+            DoubleSineToken(predictedTokenB),
+            address(launcher)
+        );
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+
+        vm.deal(address(0xA11CE), ANTI_SNIPE_MAX_BUY_WEI * 2);
+        vm.prank(address(0xA11CE));
+        vm.expectRevert(AtomicDoubleSineDeployer.OnlyOwner.selector);
+        launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                permit2: address(0),
                 universalRouter: address(0),
                 beneficiary: beneficiary,
                 hookSalt: salt,

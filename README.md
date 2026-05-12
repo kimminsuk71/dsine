@@ -65,7 +65,7 @@ forge build
 forge test
 ```
 
-You should see **57 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **55 tests passing**:
+You should see **63 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **61 tests passing**:
 
 ```bash
 forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"
@@ -139,6 +139,9 @@ These trade-offs are how the no-external-venue property is enforced. The canonic
 - **No-arb gate**: enforced at `_transfer` via contract-code checks on both `from` and `to`, plus a caller guard that rejects unapproved contract callers. Deployed contracts must be in the locked authorization list; only `bindHook` can add the hook itself, once.
 - **Router key gate**: `DoubleSineRouter` is one-time bound to tokenA/tokenB plus the canonical hook and rejects non-canonical PoolKeys before pulling user tokens.
 - **Hook binding guard**: token and router binding reject hook addresses without deployed code and verify the hook's `manager/tokenA/tokenB` getters match the system being bound.
+- **System address guard**: PoolManager, router, token, hook, and optional integration addresses must already have deployed code before they can be bound or authorized.
+- **Launcher ownership**: the atomic launcher can only be executed by its deployer, preventing a public-mempool caller from front-running `launch` and taking the first-buy allocation.
+- **Exact-input bounds**: swap entrypoints explicitly reject `type(int256).min` amount values instead of relying on arithmetic panic behavior.
 - **PoolManager singleton guard**: v4 PoolManager is authorized for canonical settlement, but token deposits into PoolManager are only accepted from this system's bound router or hook. This blocks alternate v4 pools from being seeded with DSA/DSB.
 - **Code-length caveat**: the EVM cannot distinguish an EOA from an address that will deploy code in the future. Such an address can receive while it has no code, but constructor-time approvals/transfers and post-deploy movement are blocked unless the caller is authorized.
 - **Mint authority**: `onlyHook` modifier + target check (`to == hook`) — even a buggy hook can't mint to arbitrary addresses.
