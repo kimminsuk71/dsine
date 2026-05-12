@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import {Hooks} from "v4-core/libraries/Hooks.sol";
+
+import {IDoubleSineHookBinding} from "./IDoubleSineHookBinding.sol";
+
 /// @notice ERC20 with a no-arbitrage transfer rule: tokens may only move
 /// between externally-owned accounts (no code) or addresses on a fixed
 /// authorized contract list. This makes deployed external pools (v2 Pair,
@@ -16,6 +20,10 @@ contract DoubleSineToken {
     string public name;
     string public symbol;
     uint8 public constant decimals = 18;
+    uint160 internal constant REQUIRED_HOOK_FLAGS = uint160(
+        Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+            | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+    );
 
     uint256 public totalSupply;
     address public immutable poolManager;
@@ -38,6 +46,8 @@ contract DoubleSineToken {
     error InsufficientBalance();
     error InsufficientAllowance();
     error ZeroAddress();
+    error HookMustHaveCode();
+    error InvalidHookBinding();
     error TransferFromUnauthorizedContract();
     error TransferToUnauthorizedContract();
 
@@ -74,6 +84,12 @@ contract DoubleSineToken {
         if (msg.sender != binder) revert NotBinder();
         if (hook != address(0)) revert AlreadyBound();
         if (newHook == address(0)) revert ZeroAddress();
+        if (newHook.code.length == 0) revert HookMustHaveCode();
+        if ((uint160(newHook) & Hooks.ALL_HOOK_MASK) != REQUIRED_HOOK_FLAGS) revert InvalidHookBinding();
+        (address hookManager, address hookTokenA, address hookTokenB) = _readHookBinding(newHook);
+        if (hookManager != poolManager || (hookTokenA != address(this) && hookTokenB != address(this))) {
+            revert InvalidHookBinding();
+        }
         hook = newHook;
         isAuthorized[newHook] = true;
         binder = address(0);
@@ -153,5 +169,28 @@ contract DoubleSineToken {
             balanceOf[to] += amount;
         }
         emit Transfer(from, to, amount);
+    }
+
+    function _readHookBinding(address hook_)
+        private
+        view
+        returns (address hookManager, address hookTokenA, address hookTokenB)
+    {
+        IDoubleSineHookBinding hookBinding = IDoubleSineHookBinding(hook_);
+        try hookBinding.manager() returns (address manager_) {
+            hookManager = manager_;
+        } catch {
+            revert InvalidHookBinding();
+        }
+        try hookBinding.tokenA() returns (address tokenA_) {
+            hookTokenA = tokenA_;
+        } catch {
+            revert InvalidHookBinding();
+        }
+        try hookBinding.tokenB() returns (address tokenB_) {
+            hookTokenB = tokenB_;
+        } catch {
+            revert InvalidHookBinding();
+        }
     }
 }

@@ -65,7 +65,7 @@ forge build
 forge test
 ```
 
-You should see **45 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **43 tests passing**:
+You should see **53 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **51 tests passing**:
 
 ```bash
 forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"
@@ -136,6 +136,7 @@ These trade-offs are how the no-external-venue property is enforced. The canonic
 - **Reentrancy**: hook never makes external calls before state writes; PoolManager doesn't callback into the hook from take/settle.
 - **No-arb gate**: enforced at `_transfer` via contract-code checks on both `from` and `to`. Deployed contracts must be in the locked authorization list; only `bindHook` can add the hook itself, once.
 - **Router key gate**: `DoubleSineRouter` is one-time bound to tokenA/tokenB plus the canonical hook and rejects non-canonical PoolKeys before pulling user tokens.
+- **Hook binding guard**: token and router binding reject hook addresses without deployed code and verify the hook's `manager/tokenA/tokenB` getters match the system being bound.
 - **PoolManager singleton guard**: v4 PoolManager is authorized for canonical settlement, but token deposits into PoolManager are only accepted from this system's bound router or hook. This blocks alternate v4 pools from being seeded with DSA/DSB.
 - **Code-length caveat**: the EVM cannot distinguish an EOA from an address that will deploy code in the future. Such an address can receive while it has no code, but once code exists it cannot move tokens unless authorized.
 - **Mint authority**: `onlyHook` modifier + target check (`to == hook`) — even a buggy hook can't mint to arbitrary addresses.

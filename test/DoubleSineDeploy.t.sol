@@ -94,6 +94,26 @@ contract DoubleSineDeployTest is Test {
         assertGe(address(hook).balance, hook.ethReserve(), "balance >= reserve");
     }
 
+    function test_hookConstructorRejectsDuplicateTokens() public {
+        PoolManager manager = new PoolManager(address(this));
+        DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](0);
+        DoubleSineToken token = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
+
+        address hookAddr = address(
+            uint160(
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+            )
+        );
+        vm.expectRevert(DoubleSineHook.DuplicateToken.selector);
+        deployCodeTo(
+            "DoubleSineHook.sol:DoubleSineHook",
+            abi.encode(IPoolManager(address(manager)), token, token, address(this)),
+            hookAddr
+        );
+    }
+
     function test_fullDeploymentFlow() public {
         // ============================================================
         // 1. Bedrock contracts

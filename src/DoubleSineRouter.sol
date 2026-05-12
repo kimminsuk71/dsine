@@ -3,12 +3,14 @@ pragma solidity ^0.8.26;
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
+import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol";
 
 import {DoubleSineToken} from "./DoubleSineToken.sol";
+import {IDoubleSineHookBinding} from "./IDoubleSineHookBinding.sol";
 
 /// @notice ETH-entry router for one DoubleSine system. The deployer binds
 /// tokenA/tokenB plus the canonical hook exactly once, then the router
@@ -29,6 +31,10 @@ contract DoubleSineRouter is IUnlockCallback {
 
     int24 public constant TICK_SPACING = 1;
     uint24 public constant POOL_FEE = 0;
+    uint160 internal constant REQUIRED_HOOK_FLAGS = uint160(
+        Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+            | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+    );
 
     struct CallbackData {
         address sender;
@@ -43,6 +49,7 @@ contract DoubleSineRouter is IUnlockCallback {
     error AlreadyBound();
     error InvalidCallback();
     error InvalidBinding();
+    error HookMustHaveCode();
     error ZeroAddress();
     error UnsupportedPool();
     error UnsupportedToken();
@@ -65,11 +72,17 @@ contract DoubleSineRouter is IUnlockCallback {
         if (address(tokenA_) == address(0) || address(tokenB_) == address(0) || hook_ == address(0)) {
             revert ZeroAddress();
         }
+        if (hook_.code.length == 0) revert HookMustHaveCode();
+        if ((uint160(hook_) & Hooks.ALL_HOOK_MASK) != REQUIRED_HOOK_FLAGS) revert InvalidBinding();
         if (address(tokenA_) == address(tokenB_)) revert UnsupportedToken();
         if (
             tokenA_.poolManager() != address(manager) || tokenB_.poolManager() != address(manager)
                 || tokenA_.router() != address(this) || tokenB_.router() != address(this)
         ) revert InvalidBinding();
+        (address hookManager, address hookTokenA, address hookTokenB) = _readHookBinding(hook_);
+        if (hookManager != address(manager) || hookTokenA != address(tokenA_) || hookTokenB != address(tokenB_)) {
+            revert InvalidBinding();
+        }
         tokenA = tokenA_;
         tokenB = tokenB_;
         hook = hook_;
@@ -168,5 +181,28 @@ contract DoubleSineRouter is IUnlockCallback {
         // slither-disable-next-line low-level-calls
         (bool ok,) = to.call{value: amount}("");
         if (!ok) revert EthTransferFailed();
+    }
+
+    function _readHookBinding(address hook_)
+        private
+        view
+        returns (address hookManager, address hookTokenA, address hookTokenB)
+    {
+        IDoubleSineHookBinding hookBinding = IDoubleSineHookBinding(hook_);
+        try hookBinding.manager() returns (address manager_) {
+            hookManager = manager_;
+        } catch {
+            revert InvalidBinding();
+        }
+        try hookBinding.tokenA() returns (address tokenA_) {
+            hookTokenA = tokenA_;
+        } catch {
+            revert InvalidBinding();
+        }
+        try hookBinding.tokenB() returns (address tokenB_) {
+            hookTokenB = tokenB_;
+        } catch {
+            revert InvalidBinding();
+        }
     }
 }

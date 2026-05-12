@@ -87,6 +87,7 @@ contract DoubleSineHook is IHooks {
     error LiquidityDisabled();
     error ExactOutputDisabled();
     error ZeroAddress();
+    error DuplicateToken();
     error InsufficientReserve();
     error TokenTransferFailed();
     error SettleFailed();
@@ -101,6 +102,7 @@ contract DoubleSineHook is IHooks {
             address(manager_) == address(0) || address(tokenA_) == address(0) || address(tokenB_) == address(0)
                 || initializer_ == address(0)
         ) revert ZeroAddress();
+        if (address(tokenA_) == address(tokenB_)) revert DuplicateToken();
         manager = manager_;
         tokenA = tokenA_;
         tokenB = tokenB_;

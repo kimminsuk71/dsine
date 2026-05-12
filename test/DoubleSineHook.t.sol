@@ -41,6 +41,10 @@ contract DoubleSineHookTest is Test {
     uint160 internal constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     uint160 internal constant MIN_PRICE_LIMIT = TickMath.MIN_SQRT_PRICE + 1;
     uint160 internal constant MAX_PRICE_LIMIT = TickMath.MAX_SQRT_PRICE - 1;
+    uint160 internal constant HOOK_FLAGS = uint160(
+        Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+            | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+    );
 
     receive() external payable {}
 
@@ -58,17 +62,7 @@ contract DoubleSineHookTest is Test {
         tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router), auth);
 
         // Hook address must encode permission flags in its low bits.
-        address hookAddr = address(
-            uint160(
-                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
-            )
-        );
-        deployCodeTo(
-            "DoubleSineHook.sol:DoubleSineHook",
-            abi.encode(IPoolManager(address(manager)), tokenA, tokenB, initializer),
-            hookAddr
-        );
+        address hookAddr = _deployHookFor(tokenA, tokenB, initializer, 0);
         hook = DoubleSineHook(payable(hookAddr));
 
         router.bindSystem(tokenA, tokenB, hookAddr);
@@ -372,6 +366,44 @@ contract DoubleSineHookTest is Test {
         tokenA.mint(user, 1e18);
     }
 
+    function test_bindHook_revertsForAddressWithoutCode() public {
+        address[] memory auth = new address[](0);
+        DoubleSineToken token =
+            new DoubleSineToken("Unbound DoubleSine", "UDS", address(manager), address(router), auth);
+
+        vm.expectRevert(DoubleSineToken.HookMustHaveCode.selector);
+        token.bindHook(makeAddr("not-a-hook"));
+    }
+
+    function test_bindHook_revertsForNonHookContract() public {
+        address[] memory auth = new address[](0);
+        DoubleSineToken token =
+            new DoubleSineToken("Unbound DoubleSine", "UDS", address(manager), address(router), auth);
+        FakeRouter fake = new FakeRouter();
+
+        vm.expectRevert(DoubleSineToken.InvalidHookBinding.selector);
+        token.bindHook(address(fake));
+    }
+
+    function test_bindHook_revertsForHookThatDoesNotReferenceToken() public {
+        address[] memory auth = new address[](0);
+        DoubleSineToken token =
+            new DoubleSineToken("Unbound DoubleSine", "UDS", address(manager), address(router), auth);
+
+        vm.expectRevert(DoubleSineToken.InvalidHookBinding.selector);
+        token.bindHook(address(hook));
+    }
+
+    function test_bindHook_revertsForSpoofedHookAtWrongAddress() public {
+        address[] memory auth = new address[](0);
+        DoubleSineToken token =
+            new DoubleSineToken("Unbound DoubleSine", "UDS", address(manager), address(router), auth);
+        FakeHookBinding fake = new FakeHookBinding(address(manager), address(token), address(tokenB));
+
+        vm.expectRevert(DoubleSineToken.InvalidHookBinding.selector);
+        token.bindHook(address(fake));
+    }
+
     function test_burn_revertsForNonHookCaller() public {
         vm.prank(user);
         vm.expectRevert(DoubleSineToken.NotHook.selector);
@@ -527,18 +559,19 @@ contract DoubleSineHookTest is Test {
             new DoubleSineToken("Fresh DoubleSine A", "FDSA", address(manager), address(fresh), auth);
         DoubleSineToken freshTokenB =
             new DoubleSineToken("Fresh DoubleSine B", "FDSB", address(manager), address(fresh), auth);
+        address freshHook = _deployHookFor(freshTokenA, freshTokenB, initializer, 1);
 
         vm.prank(user);
         vm.expectRevert(DoubleSineRouter.NotBinder.selector);
-        fresh.bindSystem(freshTokenA, freshTokenB, address(hook));
+        fresh.bindSystem(freshTokenA, freshTokenB, freshHook);
 
-        fresh.bindSystem(freshTokenA, freshTokenB, address(hook));
+        fresh.bindSystem(freshTokenA, freshTokenB, freshHook);
         assertEq(address(fresh.tokenA()), address(freshTokenA));
         assertEq(address(fresh.tokenB()), address(freshTokenB));
-        assertEq(fresh.hook(), address(hook));
+        assertEq(fresh.hook(), freshHook);
 
         vm.expectRevert(DoubleSineRouter.AlreadyBound.selector);
-        fresh.bindSystem(freshTokenA, freshTokenB, address(hook));
+        fresh.bindSystem(freshTokenA, freshTokenB, freshHook);
     }
 
     function test_router_bindSystemRejectsMismatchedRouterToken() public {
@@ -548,9 +581,58 @@ contract DoubleSineHookTest is Test {
         fresh.bindSystem(tokenA, tokenB, address(hook));
     }
 
+    function test_router_bindSystemRejectsAddressWithoutCodeHook() public {
+        DoubleSineRouter fresh = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](0);
+        DoubleSineToken freshTokenA =
+            new DoubleSineToken("Fresh DoubleSine A", "FDSA", address(manager), address(fresh), auth);
+        DoubleSineToken freshTokenB =
+            new DoubleSineToken("Fresh DoubleSine B", "FDSB", address(manager), address(fresh), auth);
+
+        vm.expectRevert(DoubleSineRouter.HookMustHaveCode.selector);
+        fresh.bindSystem(freshTokenA, freshTokenB, makeAddr("not-a-hook"));
+    }
+
+    function test_router_bindSystemRejectsHookForDifferentTokens() public {
+        DoubleSineRouter fresh = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](0);
+        DoubleSineToken freshTokenA =
+            new DoubleSineToken("Fresh DoubleSine A", "FDSA", address(manager), address(fresh), auth);
+        DoubleSineToken freshTokenB =
+            new DoubleSineToken("Fresh DoubleSine B", "FDSB", address(manager), address(fresh), auth);
+
+        vm.expectRevert(DoubleSineRouter.InvalidBinding.selector);
+        fresh.bindSystem(freshTokenA, freshTokenB, address(hook));
+    }
+
+    function test_router_bindSystemRejectsSpoofedHookAtWrongAddress() public {
+        DoubleSineRouter fresh = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](0);
+        DoubleSineToken freshTokenA =
+            new DoubleSineToken("Fresh DoubleSine A", "FDSA", address(manager), address(fresh), auth);
+        DoubleSineToken freshTokenB =
+            new DoubleSineToken("Fresh DoubleSine B", "FDSB", address(manager), address(fresh), auth);
+        FakeHookBinding fake = new FakeHookBinding(address(manager), address(freshTokenA), address(freshTokenB));
+
+        vm.expectRevert(DoubleSineRouter.InvalidBinding.selector);
+        fresh.bindSystem(freshTokenA, freshTokenB, address(fake));
+    }
+
     // ============================================================
     // Helpers
     // ============================================================
+
+    function _deployHookFor(DoubleSineToken tokenA_, DoubleSineToken tokenB_, address initializer_, uint160 nonce)
+        internal
+        returns (address hookAddr)
+    {
+        hookAddr = address(uint160(HOOK_FLAGS | (nonce << 14)));
+        deployCodeTo(
+            "DoubleSineHook.sol:DoubleSineHook",
+            abi.encode(IPoolManager(address(manager)), tokenA_, tokenB_, initializer_),
+            hookAddr
+        );
+    }
 
     function _buyA(address buyer, uint256 amount) internal returns (BalanceDelta) {
         vm.prank(buyer);
@@ -673,6 +755,18 @@ contract DoubleSineHookTest is Test {
 contract FakeRouter {
     function ping() external pure returns (bool) {
         return true;
+    }
+}
+
+contract FakeHookBinding {
+    address public immutable manager;
+    address public immutable tokenA;
+    address public immutable tokenB;
+
+    constructor(address manager_, address tokenA_, address tokenB_) {
+        manager = manager_;
+        tokenA = tokenA_;
+        tokenB = tokenB_;
     }
 }
 
