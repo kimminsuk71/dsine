@@ -269,6 +269,56 @@ function logRow(msg) {
 }
 
 // ============================================================
+// Live mode - subscribe to deployed hook events.
+// ============================================================
+window.connectLive = async function connectLive(rpcUrl, hookAddress, hookAbi) {
+  const provider = new ethers.JsonRpcProvider(rpcUrl);
+  const hook = new ethers.Contract(hookAddress, hookAbi, provider);
+
+  reset();
+  document.getElementById('mode').textContent = 'Live';
+  document.getElementById('mode').classList.add('live');
+  logRow(`Connected to ${hookAddress}`);
+
+  const onBuy = (sender, isA, ethIn, tokenOut, virtualEthAfter, priceAfter) => {
+    const side = isA ? 'A' : 'B';
+    const eth = Number(ethers.formatEther(ethIn));
+    const tokens = Number(ethers.formatEther(tokenOut));
+    state.virtualEth = Number(ethers.formatEther(virtualEthAfter));
+    state.ethReserve += eth;
+    if (side === 'A') state.supplyA += tokens;
+    else state.supplyB += tokens;
+    pushLiveEvent({ side, kind: 'buy', eth, tokens, px: Number(ethers.formatEther(priceAfter)) });
+  };
+
+  const onSell = (sender, isA, tokenIn, ethOut, virtualEthAfter, priceAfter) => {
+    const side = isA ? 'A' : 'B';
+    const eth = Number(ethers.formatEther(ethOut));
+    const tokens = Number(ethers.formatEther(tokenIn));
+    state.virtualEth = Number(ethers.formatEther(virtualEthAfter));
+    state.ethReserve = Math.max(0, state.ethReserve - eth);
+    if (side === 'A') state.supplyA = Math.max(0, state.supplyA - tokens);
+    else state.supplyB = Math.max(0, state.supplyB - tokens);
+    pushLiveEvent({ side, kind: 'sell', eth, tokens, px: Number(ethers.formatEther(priceAfter)) });
+  };
+
+  await hook.on('Buy', onBuy);
+  await hook.on('Sell', onSell);
+  return { provider, hook };
+};
+
+function pushLiveEvent(event) {
+  state.events.unshift({ ...event, vE: state.virtualEth });
+  state.series.push({
+    step: state.series.length,
+    vE: state.virtualEth,
+    pA: event.px,
+    pB: event.px,
+  });
+  redraw();
+}
+
+// ============================================================
 // Boot - auto-run a moderate amount of trading so the curve is visible.
 // ============================================================
 reset();

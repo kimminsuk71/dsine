@@ -25,9 +25,9 @@ library DoubleSineMath {
     uint256 internal constant WAD = 1e18;
 
     // Virtual reserve seeds. Hook initializes its state to these on deploy.
-    uint256 internal constant VIRTUAL_ETH_INIT   = 1e18;     // 1 ETH
-    uint256 internal constant VIRTUAL_TOKEN_INIT = 1e24;     // 1M tokens (18 decimals)
-    uint256 internal constant K                  = VIRTUAL_ETH_INIT * VIRTUAL_TOKEN_INIT; // 1e42
+    uint256 internal constant VIRTUAL_ETH_INIT = 1e18; // 1 ETH
+    uint256 internal constant VIRTUAL_TOKEN_INIT = 1e24; // 1M tokens (18 decimals)
+    uint256 internal constant K = VIRTUAL_ETH_INIT * VIRTUAL_TOKEN_INIT; // 1e42
 
     // ============================================================
     // Pure curve math (no state)

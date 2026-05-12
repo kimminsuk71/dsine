@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-/// @notice ERC20 with a no-arbitrage transfer rule: tokens may only be sent
-/// to externally-owned accounts (no code) or to addresses on a fixed
-/// authorized contract list. This makes external pools (v2 Pair, v3 Pool,
-/// CEX deposit, lending markets) UNABLE to receive the token, so the
-/// canonical hook pool is the ONLY market - thus no arbitrage is possible.
+/// @notice ERC20 with a no-arbitrage transfer rule: tokens may only move
+/// between externally-owned accounts (no code) or addresses on a fixed
+/// authorized contract list. This makes deployed external pools (v2 Pair,
+/// v3 Pool, CEX deposit, lending markets) unable to receive or move the token,
+/// so the canonical hook pool is the only supported market.
 ///
-/// Authorized set is locked at construction: the launcher whitelists the
-/// hook, V4 PoolManager, our router, Permit2, and (optionally) the Uniswap
-/// Universal Router so DEX aggregators (GMGN / DexScreener / Photon) can
-/// route swap traffic into the canonical pool. Whitelisting Universal
-/// Router does NOT enable external LPs because the actual pool addresses
-/// (v2 Pair, v3 Pool) themselves are not whitelisted - any transfer that
-/// would terminate at one of those addresses reverts.
+/// Authorized set is locked at construction: PoolManager and the canonical
+/// router are constructor-bound, the hook is added once through bindHook,
+/// and optional integration contracts can be listed at deploy time. Because
+/// Uniswap v4 uses one singleton PoolManager for all pools, deposits into
+/// PoolManager are further restricted to this router/hook settlement path.
 contract DoubleSineToken {
     string public name;
     string public symbol;
     uint8 public constant decimals = 18;
 
     uint256 public totalSupply;
+    address public immutable poolManager;
+    address public immutable router;
     address public hook;
     address private binder;
 
@@ -38,12 +38,26 @@ contract DoubleSineToken {
     error InsufficientBalance();
     error InsufficientAllowance();
     error ZeroAddress();
+    error TransferFromUnauthorizedContract();
     error TransferToUnauthorizedContract();
 
-    constructor(string memory name_, string memory symbol_, address[] memory authorized_) {
+    constructor(
+        string memory name_,
+        string memory symbol_,
+        address poolManager_,
+        address router_,
+        address[] memory authorized_
+    ) {
+        if (poolManager_ == address(0) || router_ == address(0)) revert ZeroAddress();
         name = name_;
         symbol = symbol_;
+        poolManager = poolManager_;
+        router = router_;
         binder = msg.sender;
+        isAuthorized[poolManager_] = true;
+        isAuthorized[router_] = true;
+        emit Authorized(poolManager_);
+        emit Authorized(router_);
         for (uint256 i = 0; i < authorized_.length; i++) {
             if (authorized_[i] == address(0)) revert ZeroAddress();
             isAuthorized[authorized_[i]] = true;
@@ -113,11 +127,22 @@ contract DoubleSineToken {
     }
 
     function _transfer(address from, address to, uint256 amount) internal {
+        if (from == address(0)) revert ZeroAddress();
         if (to == address(0)) revert ZeroAddress();
-        // No-arb gate: contracts must be whitelisted; EOAs always pass.
-        // Note: tx.origin and code-length checks combined defeat the
-        // common reentrancy-style "fake EOA" trick because a contract's
-        // code.length is non-zero from the start of its first call frame.
+        // v4 PoolManager is a singleton shared by every v4 pool. Keep it
+        // authorized for canonical settlement, but only let this system's
+        // router/hook push tokens into it; otherwise anyone could seed an
+        // external v4 pool and bypass the canonical hook market.
+        if (to == poolManager && msg.sender != router && msg.sender != hook) {
+            revert TransferToUnauthorizedContract();
+        }
+        // No-arb gate: deployed contracts must be whitelisted on both sides;
+        // EOAs have no code and pass. Checking `from` also prevents tokens
+        // that somehow reached an unauthorized contract from being moved back
+        // out through a non-canonical venue.
+        if (from.code.length != 0 && !isAuthorized[from]) {
+            revert TransferFromUnauthorizedContract();
+        }
         if (to.code.length != 0 && !isAuthorized[to]) {
             revert TransferToUnauthorizedContract();
         }

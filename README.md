@@ -1,6 +1,6 @@
 # DoubleSine
 
-Twin-token system on Uniswap v4: two ERC20s (**DSA** and **DSB**) whose prices are mathematically locked to be equal at every moment, with no possibility of external pools or arbitrage.
+Twin-token system on Uniswap v4: two ERC20s (**DSA** and **DSB**) whose prices are mathematically locked to be equal at every moment. Deployed unauthorized contracts are blocked from receiving or moving the tokens, so the canonical hook pool is the only supported market.
 
 ```
                                     ┌──────────────────────────────┐
@@ -16,13 +16,13 @@ Twin-token system on Uniswap v4: two ERC20s (**DSA** and **DSB**) whose prices a
                                           DoubleSineRouter
                                                   ▲
                                                   │
-                                          user / GMGN / aggregator
+                                          user / integration
 ```
 
 ## Properties
 
 - **Two tokens, one price** — any trade on either side moves both prices identically.
-- **No arbitrage** — token transfers are gated so external pools (v2 Pair, v3 Pool, CEX deposits, lending markets) cannot receive A or B. The canonical hook pool is the only market.
+- **No external venues by default** — token transfers are gated so deployed external pools (v2 Pair, v3 Pool, CEX deposits, lending markets) cannot receive or move A/B. The canonical hook pool is the only supported market.
 - **Pump-style bonding curve** — single shared virtual reserve drives pricing; parabolic shape (flat at start, steeper as inflows accumulate).
 - **Anti-sniper window** — first 5 blocks after init cap per-swap buys at 0.001 ETH on both pools.
 - **No LP risk** — the hook *is* the AMM; `addLiquidity` reverts.
@@ -36,7 +36,7 @@ src/                         contracts
 ├── DoubleSineMath.sol       pure curve math (constant product x*y=k)
 ├── DoubleSineToken.sol      restricted ERC20 (no-arb transfer gate)
 ├── DoubleSineHook.sol       single hook controlling both ETH/A and ETH/B pools
-└── DoubleSineRouter.sol     generic ETH-entry router (handles A and B by PoolKey)
+└── DoubleSineRouter.sol     bound ETH-entry router (serves only canonical PoolKeys)
 
 test/
 ├── DoubleSineMath.t.sol     curve invariants, price monotonicity, trajectory dump
@@ -44,7 +44,7 @@ test/
 └── DoubleSineDeploy.t.sol   full deployment flow rehearsal (CREATE2 + initialize + first-buy)
 
 script/
-├── DeployDoubleSine.s.sol   7-step deployment + atomic first-buy
+├── DeployDoubleSine.s.sol   launcher deploy + one-tx market launch / first-buy
 └── utils/HookMiner.sol      CREATE2 salt miner for hook permission bits
 
 frontend/
@@ -59,17 +59,21 @@ git clone <repo>
 cd dsine
 
 # Install Solidity dependencies (Uniswap v4-core bundles forge-std, solmate, oz)
-forge install Uniswap/v4-core --no-commit
+forge install Uniswap/v4-core --no-git
 
 forge build
 forge test
 ```
 
-You should see **35 tests passing** across three suites.
+You should see **45 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **43 tests passing**:
+
+```bash
+forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"
+```
 
 ## Deployment
 
-The deploy script handles router + tokens + mined hook + pool init + atomic first-buy in one run.
+The deploy script first deploys an `AtomicDoubleSineDeployer`, predicts the launch-created addresses, mines the hook salt off-chain, then sends one `launch` transaction. That `launch` transaction deploys the router, tokens, hook, binds the router to the canonical tokens/hook, initializes both pools, and performs the optional first-buy atomically.
 
 ```bash
 # Sepolia
@@ -81,7 +85,7 @@ forge script script/DeployDoubleSine.s.sol \
   --private-key $DEPLOYER_PK \
   --broadcast
 
-# Mainnet (submit via Flashbots Protect to evade sniper bots during the cap window)
+# Mainnet (submit the launch tx via Flashbots Protect to reduce sniper exposure)
 POOL_MANAGER=0x000000000004444c5dc75cB358380D2e3dE08A90 \
 PERMIT2=0x000000000022D473030F116dDEE9F6B43aC78BA3 \
 UNIVERSAL_ROUTER=0x66a9893cC07D91D95644AEDD05D03f95e1dBA8Af \
@@ -96,8 +100,8 @@ forge script script/DeployDoubleSine.s.sol \
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `FIRST_BUY` | `1_000_000_000_000_000` (0.001 ETH) | Atomic first-buy size per pool; must be `<= ANTI_SNIPE_MAX_BUY_WEI`. Set to `0` to skip. |
-| `PERMIT2` | unset | Whitelist Permit2 in token auth list (needed for Universal Router) |
-| `UNIVERSAL_ROUTER` | unset | Whitelist Universal Router (needed for GMGN / aggregators) |
+| `PERMIT2` | unset | Optional token auth entry for integrations that custody/forward tokens. Does not permit direct PoolManager deposits. |
+| `UNIVERSAL_ROUTER` | unset | Optional token auth entry for integrations that custody/forward tokens. Direct v4 PoolManager deposits remain blocked. |
 
 ## Frontend
 
@@ -108,28 +112,32 @@ python3 -m http.server 8000 --directory frontend
 # open http://localhost:8000
 ```
 
-For live mode (after deploying), call `connectLive(rpcUrl, hookAddress, hookAbi)` in the dev console — it subscribes to `Buy` and `Sell` events and updates the chart in real time.
+For live mode (after deploying), call `connectLive(rpcUrl, hookAddress, hookAbi)` in the dev console. It subscribes to `Buy` and `Sell` events and updates the chart in real time.
 
 ## What it can and can't do
 
 ✅ **Can**
 
-- Trade DSA and DSB on the canonical hook pool through any caller (deployer, EOA, Universal Router, 1inch, GMGN, etc. — anything in the auth list at deploy time).
+- Trade DSA and DSB on the canonical hook pool through `DoubleSineRouter`.
 - Transfer DSA/DSB freely between EOAs.
-- Be detected by DexScreener / DexTools / GMGN once Universal Router is in the auth list (recommended).
+- Allow approved integration contracts to custody/forward tokens when explicitly included in the auth list.
 
 ❌ **Can't**
 
 - Deposit DSA/DSB to Aave, Compound, or most other DeFi protocols (transfer to their contracts reverts).
 - List DSA/DSB on a CEX (deposit contracts can't hold the token).
-- Open a v2 Pair / v3 Pool for DSA/DSB (the pool contract itself can't receive the token).
+- Open a deployed v2 Pair / v3 Pool for DSA/DSB (the pool contract itself can't receive or move the token).
+- Seed an alternate v4 pool through the singleton PoolManager; deposits into PoolManager are restricted to the canonical router/hook settlement path.
 
-These trade-offs are how the no-arb property is enforced. The canonical hook pool is the only venue, so there's no second price to arbitrage against.
+These trade-offs are how the no-external-venue property is enforced. The canonical hook pool is the only supported venue, so there should be no persistent second market to arbitrage against.
 
 ## Security
 
 - **Reentrancy**: hook never makes external calls before state writes; PoolManager doesn't callback into the hook from take/settle.
-- **No-arb gate**: enforced at `_transfer` via `to.code.length != 0 && !isAuthorized[to]`. The auth list is locked at construction (only `bindHook` can add the hook itself, once).
+- **No-arb gate**: enforced at `_transfer` via contract-code checks on both `from` and `to`. Deployed contracts must be in the locked authorization list; only `bindHook` can add the hook itself, once.
+- **Router key gate**: `DoubleSineRouter` is one-time bound to tokenA/tokenB plus the canonical hook and rejects non-canonical PoolKeys before pulling user tokens.
+- **PoolManager singleton guard**: v4 PoolManager is authorized for canonical settlement, but token deposits into PoolManager are only accepted from this system's bound router or hook. This blocks alternate v4 pools from being seeded with DSA/DSB.
+- **Code-length caveat**: the EVM cannot distinguish an EOA from an address that will deploy code in the future. Such an address can receive while it has no code, but once code exists it cannot move tokens unless authorized.
 - **Mint authority**: `onlyHook` modifier + target check (`to == hook`) — even a buggy hook can't mint to arbitrary addresses.
 - **Reserve invariant**: `address(hook).balance >= ethReserve` always holds. The accounting allows orphan ETH (direct donations) without breaking sells.
 - **Anti-sniper**: 5-block window enforces 0.001 ETH cap on per-swap buys. Both pools share one bootstrap anchor.

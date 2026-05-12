@@ -17,6 +17,7 @@ import {DoubleSineToken} from "../src/DoubleSineToken.sol";
 import {DoubleSineHook} from "../src/DoubleSineHook.sol";
 import {DoubleSineRouter} from "../src/DoubleSineRouter.sol";
 import {HookMiner} from "../script/utils/HookMiner.sol";
+import {AtomicDoubleSineDeployer} from "../script/DeployDoubleSine.s.sol";
 
 /// @notice Full-fidelity dry run of the production deployment flow. Exercises
 /// the EXACT same sequence the deploy script will run on mainnet/Sepolia:
@@ -34,16 +35,64 @@ import {HookMiner} from "../script/utils/HookMiner.sol";
 contract DoubleSineDeployTest is Test {
     uint160 internal constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     uint160 internal constant MIN_PRICE_LIMIT = 4295128740;
+    uint256 internal constant ANTI_SNIPE_MAX_BUY_WEI = 0.001 ether;
 
     uint160 internal constant HOOK_FLAGS = uint160(
-        Hooks.AFTER_INITIALIZE_FLAG
-            | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-            | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
-            | Hooks.BEFORE_SWAP_FLAG
-            | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+        Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+            | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
     );
 
     receive() external payable {}
+
+    function test_atomicLaunchFlow() public {
+        PoolManager manager = new PoolManager(address(this));
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+        address beneficiary = makeAddr("beneficiary");
+
+        address predictedRouter = vm.computeCreateAddress(address(launcher), 1);
+        address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
+        address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
+        bytes memory ctorArgs = abi.encode(
+            IPoolManager(address(manager)),
+            DoubleSineToken(predictedTokenA),
+            DoubleSineToken(predictedTokenB),
+            address(launcher)
+        );
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+
+        uint256 firstBuyWei = ANTI_SNIPE_MAX_BUY_WEI;
+        AtomicDoubleSineDeployer.Deployment memory deployment = launcher.launch{value: firstBuyWei * 2}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                permit2: address(0),
+                universalRouter: address(0),
+                beneficiary: beneficiary,
+                hookSalt: salt,
+                expectedHook: expectedHook,
+                firstBuyWei: firstBuyWei
+            })
+        );
+
+        assertEq(deployment.router, predictedRouter, "router prediction");
+        assertEq(deployment.tokenA, predictedTokenA, "tokenA prediction");
+        assertEq(deployment.tokenB, predictedTokenB, "tokenB prediction");
+        assertEq(deployment.hook, expectedHook, "hook prediction");
+
+        DoubleSineToken tokenA = DoubleSineToken(deployment.tokenA);
+        DoubleSineToken tokenB = DoubleSineToken(deployment.tokenB);
+        DoubleSineHook hook = DoubleSineHook(payable(deployment.hook));
+
+        assertTrue(hook.poolAInitialized(), "pool A initialized");
+        assertTrue(hook.poolBInitialized(), "pool B initialized");
+        assertEq(hook.bootstrapBlock(), block.number, "bootstrap block");
+        assertEq(hook.currentPriceA(), hook.currentPriceB(), "locked price");
+        assertGt(tokenA.balanceOf(beneficiary), 0, "beneficiary got A");
+        assertGt(tokenB.balanceOf(beneficiary), 0, "beneficiary got B");
+        assertEq(tokenA.balanceOf(address(launcher)), 0, "launcher A swept");
+        assertEq(tokenB.balanceOf(address(launcher)), 0, "launcher B swept");
+        assertGe(address(hook).balance, hook.ethReserve(), "balance >= reserve");
+    }
 
     function test_fullDeploymentFlow() public {
         // ============================================================
@@ -55,29 +104,24 @@ contract DoubleSineDeployTest is Test {
         // ============================================================
         // 2. Tokens with locked authorization list
         // ============================================================
-        address[] memory auth = new address[](2);
-        auth[0] = address(manager);
-        auth[1] = address(router);
-        DoubleSineToken tokenA = new DoubleSineToken("DoubleSine A", "DSA", auth);
-        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", auth);
+        address[] memory auth = new address[](0);
+        DoubleSineToken tokenA = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
+        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router), auth);
 
         // ============================================================
         // 3. Mine the CREATE2 salt
         // ============================================================
-        bytes memory ctorArgs = abi.encode(
-            IPoolManager(address(manager)), tokenA, tokenB, address(this)
-        );
-        (address expectedHook, bytes32 salt) = HookMiner.find(
-            address(this), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs
-        );
+        bytes memory ctorArgs = abi.encode(IPoolManager(address(manager)), tokenA, tokenB, address(this));
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(this), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
 
         // ============================================================
         // 4. CREATE2 deploy
         // ============================================================
-        DoubleSineHook hook = new DoubleSineHook{salt: salt}(
-            IPoolManager(address(manager)), tokenA, tokenB, address(this)
-        );
+        DoubleSineHook hook =
+            new DoubleSineHook{salt: salt}(IPoolManager(address(manager)), tokenA, tokenB, address(this));
         require(address(hook) == expectedHook, "hook address mismatch");
+        router.bindSystem(tokenA, tokenB, address(hook));
 
         // ============================================================
         // 5. Bind hook on tokens
@@ -155,11 +199,12 @@ contract DoubleSineDeployTest is Test {
             // forge-lint: disable-next-line(unsafe-typecast)
             SwapParams({zeroForOne: true, amountSpecified: -int256(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
             ""
-        ) returns (BalanceDelta) {
+        ) returns (
+            BalanceDelta
+        ) {
             return false;
         } catch {
             return true;
         }
     }
 }
-

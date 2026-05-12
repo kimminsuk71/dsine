@@ -10,41 +10,30 @@ import {Hooks} from "v4-core/libraries/Hooks.sol";
 ///
 /// Vendored from Uniswap v4-periphery to avoid pulling the full lib.
 library HookMiner {
-    uint160 constant FLAG_MASK = Hooks.ALL_HOOK_MASK;
-    uint256 constant MAX_LOOP  = 160_444;
+    uint160 internal constant FLAG_MASK = Hooks.ALL_HOOK_MASK;
+    uint256 internal constant MAX_LOOP = 160_444;
 
-    function find(
-        address deployer,
-        uint160 flags,
-        bytes memory creationCode,
-        bytes memory constructorArgs
-    ) internal view returns (address hook, bytes32 salt) {
+    error NoSaltFound();
+
+    function find(address deployer, uint160 flags, bytes memory creationCode, bytes memory constructorArgs)
+        internal
+        view
+        returns (address hook, bytes32 salt)
+    {
         flags = flags & FLAG_MASK;
         bytes memory initCode = abi.encodePacked(creationCode, constructorArgs);
 
-        for (uint256 s; s < MAX_LOOP; s++) {
+        for (uint256 s; s < MAX_LOOP; ++s) {
             address candidate = computeAddress(deployer, s, initCode);
             if (uint160(candidate) & FLAG_MASK == flags && candidate.code.length == 0) {
                 // forge-lint: disable-next-line(unsafe-typecast)
                 return (candidate, bytes32(s));
             }
         }
-        revert("HookMiner: no salt found");
+        revert NoSaltFound();
     }
 
-    function computeAddress(address deployer, uint256 salt, bytes memory initCode)
-        internal
-        pure
-        returns (address)
-    {
-        return address(
-            uint160(
-                uint256(
-                    keccak256(
-                        abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(initCode))
-                    )
-                )
-            )
-        );
+    function computeAddress(address deployer, uint256 salt, bytes memory initCode) internal pure returns (address) {
+        return address(uint160(uint256(keccak256(abi.encodePacked(bytes1(0xFF), deployer, salt, keccak256(initCode))))));
     }
 }

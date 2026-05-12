@@ -40,7 +40,7 @@ contract DoubleSineHook is IHooks {
     // Trader-side fees in basis points (10000 = 100%). Skimmed before
     // the curve sees the trade size; retained in ethReserve as protocol
     // cushion. Symmetric 1%/1% matches pump.fun parity.
-    uint256 public constant BUY_FEE_BPS  = 100;
+    uint256 public constant BUY_FEE_BPS = 100;
     uint256 public constant SELL_FEE_BPS = 100;
 
     PoolId public canonicalPoolA;
@@ -73,20 +73,10 @@ contract DoubleSineHook is IHooks {
 
     event PoolInitialized(bool isA, PoolId poolId);
     event Buy(
-        address indexed sender,
-        bool isA,
-        uint256 ethIn,
-        uint256 tokenOut,
-        uint256 virtualEthAfter,
-        uint256 priceAfter
+        address indexed sender, bool isA, uint256 ethIn, uint256 tokenOut, uint256 virtualEthAfter, uint256 priceAfter
     );
     event Sell(
-        address indexed sender,
-        bool isA,
-        uint256 tokenIn,
-        uint256 ethOut,
-        uint256 virtualEthAfter,
-        uint256 priceAfter
+        address indexed sender, bool isA, uint256 tokenIn, uint256 ethOut, uint256 virtualEthAfter, uint256 priceAfter
     );
 
     error OnlyPoolManager();
@@ -96,19 +86,21 @@ contract DoubleSineHook is IHooks {
     error NonCanonicalPool();
     error LiquidityDisabled();
     error ExactOutputDisabled();
+    error ZeroAddress();
     error InsufficientReserve();
     error TokenTransferFailed();
+    error SettleFailed();
     error HookNotImplemented();
     error AntiSnipeBuyCapped();
     error Slippage();
-    error MintToWrongAddress();
+    error InvalidHookData();
+    error Int128Overflow();
 
-    constructor(
-        IPoolManager manager_,
-        DoubleSineToken tokenA_,
-        DoubleSineToken tokenB_,
-        address initializer_
-    ) {
+    constructor(IPoolManager manager_, DoubleSineToken tokenA_, DoubleSineToken tokenB_, address initializer_) {
+        if (
+            address(manager_) == address(0) || address(tokenA_) == address(0) || address(tokenB_) == address(0)
+                || initializer_ == address(0)
+        ) revert ZeroAddress();
         manager = manager_;
         tokenA = tokenA_;
         tokenB = tokenB_;
@@ -159,7 +151,7 @@ contract DoubleSineHook is IHooks {
     {
         if (sender != initializer) revert OnlyInitializer();
 
-        bool isA;
+        bool isA = false;
         if (Currency.unwrap(key.currency1) == address(tokenA)) {
             if (poolAInitialized) revert PoolAlreadyInitialized();
             isA = true;
@@ -171,9 +163,7 @@ contract DoubleSineHook is IHooks {
         }
 
         if (
-            Currency.unwrap(key.currency0) != address(0)
-                || key.fee != POOL_FEE
-                || key.tickSpacing != TICK_SPACING
+            Currency.unwrap(key.currency0) != address(0) || key.fee != POOL_FEE || key.tickSpacing != TICK_SPACING
                 || key.hooks != IHooks(address(this))
         ) revert InvalidPoolShape();
 
@@ -221,12 +211,12 @@ contract DoubleSineHook is IHooks {
     // Swap: the meat
     // ============================================================
 
-    function beforeSwap(
-        address /* sender */,
-        PoolKey calldata key,
-        SwapParams calldata params,
-        bytes calldata hookData
-    ) external override onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24) {
+    function beforeSwap(address sender, PoolKey calldata key, SwapParams calldata params, bytes calldata hookData)
+        external
+        override
+        onlyPoolManager
+        returns (bytes4, BeforeSwapDelta, uint24)
+    {
         bool isA = _classifyPool(key);
         if (params.amountSpecified >= 0) revert ExactOutputDisabled();
         uint256 amountIn = uint256(-params.amountSpecified);
@@ -236,18 +226,21 @@ contract DoubleSineHook is IHooks {
         //   - buy: minTokensOut
         //   - sell: minEthOut
         // Empty hookData -> minOut = 0 -> no protection (caller's choice).
-        uint256 minOut = hookData.length >= 32 ? abi.decode(hookData, (uint256)) : 0;
+        // Any non-empty value must be exactly one ABI-encoded uint256 so
+        // malformed calldata cannot silently disable the caller's protection.
+        if (hookData.length != 0 && hookData.length != 32) revert InvalidHookData();
+        uint256 minOut = hookData.length == 32 ? abi.decode(hookData, (uint256)) : 0;
 
         if (params.zeroForOne) {
             // BUY: ETH -> token
-            return _executeBuy(key, amountIn, isA, minOut);
+            return _executeBuy(sender, key, amountIn, isA, minOut);
         } else {
             // SELL: token -> ETH
-            return _executeSell(key, amountIn, isA, minOut);
+            return _executeSell(sender, key, amountIn, isA, minOut);
         }
     }
 
-    function _executeBuy(PoolKey calldata key, uint256 ethIn, bool isA, uint256 minTokensOut)
+    function _executeBuy(address sender, PoolKey calldata key, uint256 ethIn, bool isA, uint256 minTokensOut)
         internal
         returns (bytes4, BeforeSwapDelta, uint24)
     {
@@ -267,25 +260,21 @@ contract DoubleSineHook is IHooks {
         uint256 tokenOut = DoubleSineMath.tokensOutForEth(virtualEth, ethCurve);
         if (tokenOut < minTokensOut) revert Slippage();
         virtualEth += ethCurve;
+        ethReserve += ethIn;
+        emit Buy(sender, isA, ethIn, tokenOut, virtualEth, DoubleSineMath.spotPrice(virtualEth));
 
         // Settle on PoolManager: hook claims the user's ETH (including
         // the fee) and delivers the token.
         manager.take(key.currency0, address(this), ethIn);
-        ethReserve += ethIn;
 
         DoubleSineToken token = isA ? tokenA : tokenB;
         token.mint(address(this), tokenOut);
         _settleToken(key.currency1, token, tokenOut);
 
-        emit Buy(msg.sender, isA, ethIn, tokenOut, virtualEth, DoubleSineMath.spotPrice(virtualEth));
-        return (
-            IHooks.beforeSwap.selector,
-            toBeforeSwapDelta(_toPositiveInt128(ethIn), _toNegativeInt128(tokenOut)),
-            0
-        );
+        return (IHooks.beforeSwap.selector, toBeforeSwapDelta(_toPositiveInt128(ethIn), _toNegativeInt128(tokenOut)), 0);
     }
 
-    function _executeSell(PoolKey calldata key, uint256 tokenIn, bool isA, uint256 minEthOut)
+    function _executeSell(address sender, PoolKey calldata key, uint256 tokenIn, bool isA, uint256 minEthOut)
         internal
         returns (bytes4, BeforeSwapDelta, uint24)
     {
@@ -301,20 +290,16 @@ contract DoubleSineHook is IHooks {
 
         virtualEth -= ethGross;
         ethReserve -= ethOut;
+        emit Sell(sender, isA, tokenIn, ethOut, virtualEth, DoubleSineMath.spotPrice(virtualEth));
 
         // Take token in, burn it. Total supply contracts on sells.
         DoubleSineToken token = isA ? tokenA : tokenB;
         manager.take(key.currency1, address(this), tokenIn);
         token.burn(address(this), tokenIn);
 
-        manager.settle{value: ethOut}();
+        if (manager.settle{value: ethOut}() != ethOut) revert SettleFailed();
 
-        emit Sell(msg.sender, isA, tokenIn, ethOut, virtualEth, DoubleSineMath.spotPrice(virtualEth));
-        return (
-            IHooks.beforeSwap.selector,
-            toBeforeSwapDelta(_toPositiveInt128(tokenIn), _toNegativeInt128(ethOut)),
-            0
-        );
+        return (IHooks.beforeSwap.selector, toBeforeSwapDelta(_toPositiveInt128(tokenIn), _toNegativeInt128(ethOut)), 0);
     }
 
     // ============================================================
@@ -322,13 +307,23 @@ contract DoubleSineHook is IHooks {
     // ============================================================
 
     function afterAddLiquidity(
-        address, PoolKey calldata, ModifyLiquidityParams calldata, BalanceDelta, BalanceDelta, bytes calldata
+        address,
+        PoolKey calldata,
+        ModifyLiquidityParams calldata,
+        BalanceDelta,
+        BalanceDelta,
+        bytes calldata
     ) external pure returns (bytes4, BalanceDelta) {
         revert HookNotImplemented();
     }
 
     function afterRemoveLiquidity(
-        address, PoolKey calldata, ModifyLiquidityParams calldata, BalanceDelta, BalanceDelta, bytes calldata
+        address,
+        PoolKey calldata,
+        ModifyLiquidityParams calldata,
+        BalanceDelta,
+        BalanceDelta,
+        bytes calldata
     ) external pure returns (bytes4, BalanceDelta) {
         revert HookNotImplemented();
     }
@@ -353,8 +348,13 @@ contract DoubleSineHook is IHooks {
     // Views
     // ============================================================
 
-    function currentPriceA() external view returns (uint256) { return DoubleSineMath.priceA(virtualEth); }
-    function currentPriceB() external view returns (uint256) { return DoubleSineMath.priceB(virtualEth); }
+    function currentPriceA() external view returns (uint256) {
+        return DoubleSineMath.priceA(virtualEth);
+    }
+
+    function currentPriceB() external view returns (uint256) {
+        return DoubleSineMath.priceB(virtualEth);
+    }
 
     // ============================================================
     // Internals
@@ -378,16 +378,19 @@ contract DoubleSineHook is IHooks {
         if (amount == 0) return;
         manager.sync(currency);
         if (!token.transfer(address(manager), amount)) revert TokenTransferFailed();
-        manager.settle();
+        if (manager.settle() != amount) revert SettleFailed();
     }
 
     // BeforeSwapDelta helpers - safe int128 casts.
     function _toPositiveInt128(uint256 v) internal pure returns (int128) {
-        require(v <= uint256(uint128(type(int128).max)), "int128 overflow");
+        if (v > uint256(uint128(type(int128).max))) revert Int128Overflow();
+        // forge-lint: disable-next-line(unsafe-typecast)
         return int128(int256(v));
     }
+
     function _toNegativeInt128(uint256 v) internal pure returns (int128) {
-        require(v <= (uint256(1) << 127), "int128 overflow");
+        if (v > uint256(uint128(type(int128).max))) revert Int128Overflow();
+        // forge-lint: disable-next-line(unsafe-typecast)
         return -int128(int256(v));
     }
 }

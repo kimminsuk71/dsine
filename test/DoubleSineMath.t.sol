@@ -8,7 +8,7 @@ import {DoubleSineMath} from "../src/DoubleSineMath.sol";
 /// the same virtual reserve, so priceA == priceB at every state.
 contract DoubleSineMathTest is Test {
     uint256 constant V0 = DoubleSineMath.VIRTUAL_ETH_INIT;
-    uint256 constant K  = DoubleSineMath.K;
+    uint256 constant K = DoubleSineMath.K;
 
     // ============================================================
     // Spot price
@@ -145,7 +145,10 @@ contract DoubleSineMathTest is Test {
 
     function _assertApproxRel(uint256 a, uint256 b, uint256 bpsTol, string memory msg_) internal pure {
         uint256 diff = a > b ? a - b : b - a;
-        if (b == 0) { require(diff == 0, msg_); return; }
+        if (b == 0) {
+            require(diff == 0, msg_);
+            return;
+        }
         require(diff * 10000 <= b * bpsTol, msg_);
     }
 }

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {Test, console2} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 import {PoolManager} from "v4-core/PoolManager.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
@@ -50,22 +51,17 @@ contract DoubleSineHookTest is Test {
         manager = new PoolManager(address(this));
         router = new DoubleSineRouter(IPoolManager(address(manager)));
 
-        // Authorize set: PoolManager + Router. Hook is added later via bindHook.
-        address[] memory auth = new address[](2);
-        auth[0] = address(manager);
-        auth[1] = address(router);
+        // PoolManager + router are constructor-bound. Hook is added later via bindHook.
+        address[] memory auth = new address[](0);
 
-        tokenA = new DoubleSineToken("DoubleSine A", "DSA", auth);
-        tokenB = new DoubleSineToken("DoubleSine B", "DSB", auth);
+        tokenA = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
+        tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router), auth);
 
         // Hook address must encode permission flags in its low bits.
         address hookAddr = address(
             uint160(
-                Hooks.AFTER_INITIALIZE_FLAG
-                    | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
-                    | Hooks.BEFORE_SWAP_FLAG
-                    | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
+                Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+                    | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
             )
         );
         deployCodeTo(
@@ -75,6 +71,7 @@ contract DoubleSineHookTest is Test {
         );
         hook = DoubleSineHook(payable(hookAddr));
 
+        router.bindSystem(tokenA, tokenB, hookAddr);
         tokenA.bindHook(hookAddr);
         tokenB.bindHook(hookAddr);
 
@@ -229,7 +226,7 @@ contract DoubleSineHookTest is Test {
 
             if (isBuy) {
                 if (isA) _buyA(user, 0.005 ether);
-                else     _buyB(user, 0.005 ether);
+                else _buyB(user, 0.005 ether);
             } else {
                 if (isA && tokenA.balanceOf(user) > 0) {
                     _sellA(user, tokenA.balanceOf(user) / 5);
@@ -237,7 +234,7 @@ contract DoubleSineHookTest is Test {
                     _sellB(user, tokenB.balanceOf(user) / 5);
                 } else {
                     if (isA) _buyA(user, 0.005 ether);
-                    else     _buyB(user, 0.005 ether);
+                    else _buyB(user, 0.005 ether);
                 }
             }
 
@@ -253,7 +250,7 @@ contract DoubleSineHookTest is Test {
 
     function test_reserveInvariant_acrossSwaps() public {
         for (uint256 i = 0; i < 30; i++) {
-            if (i % 3 == 0)      _buyA(user, 0.01 ether);
+            if (i % 3 == 0) _buyA(user, 0.01 ether);
             else if (i % 3 == 1) _buyB(user, 0.01 ether);
             else if (tokenA.balanceOf(user) > 0) _sellA(user, tokenA.balanceOf(user) / 10);
 
@@ -282,6 +279,7 @@ contract DoubleSineHookTest is Test {
 
         vm.prank(user);
         vm.expectRevert(DoubleSineToken.TransferToUnauthorizedContract.selector);
+        // forge-lint: disable-next-line(erc20-unchecked-transfer)
         tokenA.transfer(address(fake), bal);
     }
 
@@ -292,11 +290,41 @@ contract DoubleSineHookTest is Test {
         address friend = address(0xDEAD);
         require(friend.code.length == 0, "friend should be EOA");
         vm.prank(user);
-        tokenA.transfer(friend, bal / 2);
+        bool ok = tokenA.transfer(friend, bal / 2);
+        assertTrue(ok, "transfer should return true");
         assertEq(tokenA.balanceOf(friend), bal / 2, "EOA-to-EOA transfer should work");
     }
 
-    function test_noArb_addLiquidityReverts() public {
+    function test_noArb_directPoolManagerDepositReverts() public {
+        _buyA(user, 0.01 ether);
+        uint256 bal = tokenA.balanceOf(user);
+
+        vm.prank(user);
+        vm.expectRevert(DoubleSineToken.TransferToUnauthorizedContract.selector);
+        // forge-lint: disable-next-line(erc20-unchecked-transfer)
+        tokenA.transfer(address(manager), bal / 2);
+    }
+
+    function test_noArb_unauthorizedContractCannotTransferOutAfterConstructorReceive() public {
+        _buyA(user, 0.01 ether);
+        uint256 amount = tokenA.balanceOf(user) / 2;
+
+        uint64 nonce = vm.getNonce(user);
+        address predictedVault = vm.computeCreateAddress(user, nonce);
+
+        vm.startPrank(user);
+        tokenA.approve(predictedVault, amount);
+        ConstructorTokenVault vault = new ConstructorTokenVault(tokenA, amount);
+        vm.stopPrank();
+
+        assertEq(address(vault), predictedVault, "unexpected vault address");
+        assertEq(tokenA.balanceOf(address(vault)), amount, "constructor receive setup failed");
+
+        vm.expectRevert(DoubleSineToken.TransferFromUnauthorizedContract.selector);
+        vault.drain(address(0xCAFE));
+    }
+
+    function test_noArb_addLiquidityReverts() public pure {
         // Anyone trying to add liquidity to either canonical pool should be
         // blocked at beforeAddLiquidity.
         // The Hooks library will throw HookCallFailed on the revert; we
@@ -350,6 +378,12 @@ contract DoubleSineHookTest is Test {
         tokenA.burn(user, 1);
     }
 
+    function test_transferFromZeroAddressRevertsEvenForZeroAmount() public {
+        vm.expectRevert(DoubleSineToken.ZeroAddress.selector);
+        // forge-lint: disable-next-line(erc20-unchecked-transfer)
+        tokenA.transferFrom(address(0), user, 0);
+    }
+
     // ============================================================
     // Slippage protection (hookData = abi.encode(minOut))
     // ============================================================
@@ -365,10 +399,15 @@ contract DoubleSineHookTest is Test {
         // Compute what we'd actually receive and ask for slightly less.
         uint256 ethCurve = (0.01 ether * (10000 - hook.BUY_FEE_BPS())) / 10000;
         uint256 expectedOut = DoubleSineMath.tokensOutForEth(hook.virtualEth(), ethCurve);
-        uint256 minOut = (expectedOut * 99) / 100;  // 1% slippage tolerance
+        uint256 minOut = (expectedOut * 99) / 100; // 1% slippage tolerance
         bool reverted = _tryBuyWithSlippage(user, 0.01 ether, minOut);
         assertFalse(reverted, "in-range min should have passed");
         assertGe(tokenA.balanceOf(user), minOut, "actual out >= min");
+    }
+
+    function test_slippage_buyReverts_whenHookDataMalformed() public {
+        bool reverted = _tryBuyWithRawHookData(user, 0.01 ether, hex"01");
+        assertTrue(reverted, "malformed hookData should revert");
     }
 
     function test_slippage_sellReverts_whenMinEthOutNotMet() public {
@@ -416,8 +455,97 @@ contract DoubleSineHookTest is Test {
         _resetToBootstrap();
         _buyA(user, hook.ANTI_SNIPE_MAX_BUY_WEI());
         uint256 tokens = tokenA.balanceOf(user);
-        _sellA(user, tokens);  // should not revert
+        _sellA(user, tokens); // should not revert
         assertEq(tokenA.balanceOf(user), 0);
+    }
+
+    function test_buyEventUsesPoolCaller() public {
+        vm.recordLogs();
+        _buyA(user, 0.01 ether);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 buyTopic = keccak256("Buy(address,bool,uint256,uint256,uint256,uint256)");
+        bool found;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(hook) && logs[i].topics.length > 0 && logs[i].topics[0] == buyTopic) {
+                address emittedSender = address(uint160(uint256(logs[i].topics[1])));
+                assertEq(emittedSender, address(router), "event should emit PoolManager caller");
+                assertNotEq(emittedSender, address(manager), "event must not emit PoolManager");
+                found = true;
+                break;
+            }
+        }
+        assertTrue(found, "Buy event not found");
+    }
+
+    function test_router_rejectsUnsupportedTokenBeforePoolManager() public {
+        PoolKey memory badKey = PoolKey({
+            currency0: CurrencyLibrary.ADDRESS_ZERO,
+            currency1: Currency.wrap(address(0xCAFE)),
+            fee: 0,
+            tickSpacing: 1,
+            hooks: IHooks(address(hook))
+        });
+
+        vm.prank(user);
+        vm.expectRevert(DoubleSineRouter.UnsupportedToken.selector);
+        router.swap{value: 0.01 ether}(
+            badKey,
+            SwapParams({
+                zeroForOne: true, amountSpecified: _exactInput(0.01 ether), sqrtPriceLimitX96: MIN_PRICE_LIMIT
+            }),
+            ""
+        );
+    }
+
+    function test_router_rejectsNonCanonicalHookBeforeTokenPull() public {
+        _buyA(user, 0.01 ether);
+        uint256 bal = tokenA.balanceOf(user);
+        uint256 amount = bal / 2;
+
+        PoolKey memory badKey = keyA;
+        badKey.hooks = IHooks(address(0));
+
+        vm.startPrank(user);
+        tokenA.approve(address(router), amount);
+        vm.expectRevert(DoubleSineRouter.UnsupportedPool.selector);
+        router.swap(
+            badKey,
+            SwapParams({zeroForOne: false, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
+            ""
+        );
+        vm.stopPrank();
+
+        assertEq(tokenA.balanceOf(user), bal, "token pull must not happen");
+        assertEq(tokenA.balanceOf(address(router)), 0, "router must not keep tokens");
+    }
+
+    function test_router_bindSystemCanOnlyRunOnceByBinder() public {
+        DoubleSineRouter fresh = new DoubleSineRouter(IPoolManager(address(manager)));
+        address[] memory auth = new address[](0);
+        DoubleSineToken freshTokenA =
+            new DoubleSineToken("Fresh DoubleSine A", "FDSA", address(manager), address(fresh), auth);
+        DoubleSineToken freshTokenB =
+            new DoubleSineToken("Fresh DoubleSine B", "FDSB", address(manager), address(fresh), auth);
+
+        vm.prank(user);
+        vm.expectRevert(DoubleSineRouter.NotBinder.selector);
+        fresh.bindSystem(freshTokenA, freshTokenB, address(hook));
+
+        fresh.bindSystem(freshTokenA, freshTokenB, address(hook));
+        assertEq(address(fresh.tokenA()), address(freshTokenA));
+        assertEq(address(fresh.tokenB()), address(freshTokenB));
+        assertEq(fresh.hook(), address(hook));
+
+        vm.expectRevert(DoubleSineRouter.AlreadyBound.selector);
+        fresh.bindSystem(freshTokenA, freshTokenB, address(hook));
+    }
+
+    function test_router_bindSystemRejectsMismatchedRouterToken() public {
+        DoubleSineRouter fresh = new DoubleSineRouter(IPoolManager(address(manager)));
+
+        vm.expectRevert(DoubleSineRouter.InvalidBinding.selector);
+        fresh.bindSystem(tokenA, tokenB, address(hook));
     }
 
     // ============================================================
@@ -426,20 +554,18 @@ contract DoubleSineHookTest is Test {
 
     function _buyA(address buyer, uint256 amount) internal returns (BalanceDelta) {
         vm.prank(buyer);
-        // forge-lint: disable-next-line(unsafe-typecast)
         return router.swap{value: amount}(
             keyA,
-            SwapParams({zeroForOne: true, amountSpecified: -int256(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
             ""
         );
     }
 
     function _buyB(address buyer, uint256 amount) internal returns (BalanceDelta) {
         vm.prank(buyer);
-        // forge-lint: disable-next-line(unsafe-typecast)
         return router.swap{value: amount}(
             keyB,
-            SwapParams({zeroForOne: true, amountSpecified: -int256(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
             ""
         );
     }
@@ -447,10 +573,9 @@ contract DoubleSineHookTest is Test {
     function _sellA(address seller, uint256 amount) internal returns (BalanceDelta) {
         vm.startPrank(seller);
         tokenA.approve(address(router), amount);
-        // forge-lint: disable-next-line(unsafe-typecast)
         BalanceDelta delta = router.swap(
             keyA,
-            SwapParams({zeroForOne: false, amountSpecified: -int256(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
+            SwapParams({zeroForOne: false, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
             ""
         );
         vm.stopPrank();
@@ -460,10 +585,9 @@ contract DoubleSineHookTest is Test {
     function _sellB(address seller, uint256 amount) internal returns (BalanceDelta) {
         vm.startPrank(seller);
         tokenB.approve(address(router), amount);
-        // forge-lint: disable-next-line(unsafe-typecast)
         BalanceDelta delta = router.swap(
             keyB,
-            SwapParams({zeroForOne: false, amountSpecified: -int256(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
+            SwapParams({zeroForOne: false, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
             ""
         );
         vm.stopPrank();
@@ -482,8 +606,7 @@ contract DoubleSineHookTest is Test {
         vm.prank(buyer);
         try router.swap{value: amount}(
             keyA,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            SwapParams({zeroForOne: true, amountSpecified: -int256(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
             ""
         ) {
             return false;
@@ -496,8 +619,7 @@ contract DoubleSineHookTest is Test {
         vm.prank(buyer);
         try router.swap{value: amount}(
             keyB,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            SwapParams({zeroForOne: true, amountSpecified: -int256(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
             ""
         ) {
             return false;
@@ -507,12 +629,15 @@ contract DoubleSineHookTest is Test {
     }
 
     function _tryBuyWithSlippage(address buyer, uint256 amount, uint256 minOut) internal returns (bool) {
+        return _tryBuyWithRawHookData(buyer, amount, abi.encode(minOut));
+    }
+
+    function _tryBuyWithRawHookData(address buyer, uint256 amount, bytes memory hookData) internal returns (bool) {
         vm.prank(buyer);
         try router.swap{value: amount}(
             keyA,
-            // forge-lint: disable-next-line(unsafe-typecast)
-            SwapParams({zeroForOne: true, amountSpecified: -int256(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
-            abi.encode(minOut)
+            SwapParams({zeroForOne: true, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            hookData
         ) {
             return false;
         } catch {
@@ -523,10 +648,9 @@ contract DoubleSineHookTest is Test {
     function _trySellWithSlippage(address seller, uint256 amount, uint256 minOut) internal returns (bool) {
         vm.startPrank(seller);
         tokenA.approve(address(router), amount);
-        // forge-lint: disable-next-line(unsafe-typecast)
         try router.swap(
             keyA,
-            SwapParams({zeroForOne: false, amountSpecified: -int256(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
+            SwapParams({zeroForOne: false, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
             abi.encode(minOut)
         ) {
             vm.stopPrank();
@@ -536,10 +660,33 @@ contract DoubleSineHookTest is Test {
             return true;
         }
     }
+
+    function _exactInput(uint256 amount) internal pure returns (int256) {
+        require(amount <= uint256(type(int256).max), "amount too large");
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return -int256(amount);
+    }
 }
 
 /// Stand-in for any "rogue" contract that would try to receive tokens.
 /// Used to test the no-arb transfer gate.
 contract FakeRouter {
-    function ping() external pure returns (bool) { return true; }
+    function ping() external pure returns (bool) {
+        return true;
+    }
+}
+
+contract ConstructorTokenVault {
+    DoubleSineToken public immutable token;
+
+    constructor(DoubleSineToken token_, uint256 amount) {
+        token = token_;
+        bool ok = token.transferFrom(msg.sender, address(this), amount);
+        require(ok, "transferFrom failed");
+    }
+
+    function drain(address to) external {
+        bool ok = token.transfer(to, token.balanceOf(address(this)));
+        require(ok, "transfer failed");
+    }
 }
