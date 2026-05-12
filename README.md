@@ -66,7 +66,7 @@ forge build
 forge test
 ```
 
-You should see **85 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **83 tests passing**:
+You should see **86 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **84 tests passing**:
 
 ```bash
 forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"
@@ -138,7 +138,7 @@ DSA/DSB are standard transferable ERC20s, so aggregators and GMGN-style routers 
 - **Hook/router binding guard**: token and router binding reject hook addresses without deployed code and verify the hook's `manager/router/tokenA/tokenB` getters match the system being bound.
 - **Open canonical v4 swaps**: canonical hook swaps accept arbitrary PoolManager callers for the canonical PoolKeys. This allows third-party v4 routers while relying on PoolManager settlement invariants.
 - **Orphan balance handling**: direct token transfers to PoolManager or the hook are allowed at the ERC20 layer, but canonical buy/sell settlement syncs before transferring and preserves orphan balances instead of counting them as swap input.
-- **Launcher binding**: `launch` is owner-only, and the first-buy beneficiary must be the owner.
+- **Launcher binding**: `launch` is owner-only, one-shot, and the first-buy beneficiary must be the owner.
 - **Direct ETH guard**: router and launcher reject raw ETH transfers; hook only accepts ETH sent by PoolManager settlement, keeping reserve accounting from being externally polluted.
 - **Forced ETH isolation**: ETH forced into the hook is not added to `ethReserve`, so sell payouts remain bounded by bookkept reserve rather than raw balance.
 - **System address guard**: PoolManager, router, token, and hook addresses must already have deployed code before they can be bound.

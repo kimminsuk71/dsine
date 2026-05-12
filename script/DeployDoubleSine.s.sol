@@ -126,6 +126,7 @@ contract AtomicDoubleSineDeployer {
     uint160 internal constant MIN_PRICE_LIMIT = TickMath.MIN_SQRT_PRICE + 1;
     uint256 internal constant ANTI_SNIPE_MAX_BUY_WEI = 0.001 ether;
     address public immutable owner;
+    bool public launched;
 
     struct LaunchParams {
         address poolManager;
@@ -155,6 +156,7 @@ contract AtomicDoubleSineDeployer {
     error TokenTransferFailed();
     error EthTransferFailed();
     error OnlyOwner();
+    error AlreadyLaunched();
     error BeneficiaryMustBeOwner();
     error DirectEthDisabled();
 
@@ -171,6 +173,8 @@ contract AtomicDoubleSineDeployer {
         if (msg.sender != owner) revert OnlyOwner();
         if (params.poolManager == address(0) || params.beneficiary == address(0)) revert ZeroAddress();
         if (params.beneficiary != owner) revert BeneficiaryMustBeOwner();
+        if (launched) revert AlreadyLaunched();
+        launched = true;
         if (params.firstBuyWei > ANTI_SNIPE_MAX_BUY_WEI) revert FirstBuyTooLarge();
         if (msg.value < params.firstBuyWei * 2) revert InsufficientEth();
 

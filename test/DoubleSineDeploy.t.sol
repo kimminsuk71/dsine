@@ -284,6 +284,45 @@ contract DoubleSineDeployTest is Test {
         );
     }
 
+    function test_atomicLaunchCanOnlyRunOnce() public {
+        PoolManager manager = new PoolManager(address(this));
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+
+        address predictedRouter = vm.computeCreateAddress(address(launcher), 1);
+        address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
+        address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
+        bytes memory ctorArgs = abi.encode(
+            IPoolManager(address(manager)),
+            predictedRouter,
+            DoubleSineToken(predictedTokenA),
+            DoubleSineToken(predictedTokenB),
+            address(launcher)
+        );
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+
+        launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                beneficiary: address(this),
+                hookSalt: salt,
+                expectedHook: expectedHook,
+                firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
+            })
+        );
+
+        vm.expectRevert(AtomicDoubleSineDeployer.AlreadyLaunched.selector);
+        launcher.launch{value: 0}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                beneficiary: address(this),
+                hookSalt: salt,
+                expectedHook: expectedHook,
+                firstBuyWei: 0
+            })
+        );
+    }
+
     function test_atomicLauncherRejectsDirectEth() public {
         AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
 

@@ -11,7 +11,7 @@ import {CustomRevert} from "v4-core/libraries/CustomRevert.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
-import {SwapParams} from "v4-core/types/PoolOperation.sol";
+import {ModifyLiquidityParams, SwapParams} from "v4-core/types/PoolOperation.sol";
 import {BalanceDelta, BalanceDeltaLibrary} from "v4-core/types/BalanceDelta.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 
@@ -443,17 +443,19 @@ contract DoubleSineHookTest is Test {
         assertEq(tokenA.balanceOf(address(vault)), 0, "vault emptied");
     }
 
-    function test_canonicalHook_addLiquidityReverts() public pure {
-        // Anyone trying to add liquidity to either canonical pool should be
-        // blocked at beforeAddLiquidity.
-        // The Hooks library will throw HookCallFailed on the revert; we
-        // just need to confirm liquidity adds DO revert through any path.
-        // This is implicitly enforced because the hook reverts on the
-        // beforeAddLiquidity callback. Direct test: call manager.modifyLiquidity
-        // would require an unlock-callback wrapper; instead we just assert the
-        // hook itself reverts on the call path it advertises.
-        bytes4 sel = DoubleSineHook.LiquidityDisabled.selector;
-        assertTrue(sel != bytes4(0));
+    function test_canonicalHook_addLiquidityRevertsThroughPoolManager() public {
+        RogueLiquidityActor liquidityActor = new RogueLiquidityActor(IPoolManager(address(manager)));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.beforeAddLiquidity.selector,
+                abi.encodeWithSelector(DoubleSineHook.LiquidityDisabled.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        liquidityActor.addLiquidity(keyA);
     }
 
     // ============================================================
@@ -1072,6 +1074,29 @@ contract ConstructorApprovalVault {
     constructor(DoubleSineToken token, address spender, uint256 amount) {
         bool ok = token.approve(spender, amount);
         require(ok, "approve failed");
+    }
+}
+
+contract RogueLiquidityActor {
+    IPoolManager public immutable manager;
+
+    constructor(IPoolManager manager_) {
+        manager = manager_;
+    }
+
+    function addLiquidity(PoolKey calldata key) external {
+        manager.unlock(abi.encode(key));
+    }
+
+    function unlockCallback(bytes calldata rawData) external returns (bytes memory) {
+        require(msg.sender == address(manager), "only manager");
+        PoolKey memory key = abi.decode(rawData, (PoolKey));
+        manager.modifyLiquidity(
+            key,
+            ModifyLiquidityParams({tickLower: -60, tickUpper: 60, liquidityDelta: int256(1 ether), salt: bytes32(0)}),
+            ""
+        );
+        return "";
     }
 }
 
