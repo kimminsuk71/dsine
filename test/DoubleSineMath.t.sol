@@ -7,8 +7,9 @@ import {DoubleSineMath} from "../src/DoubleSineMath.sol";
 /// @notice Validates the constant-product curve math. Both tokens share
 /// the same virtual reserve, so priceA == priceB at every state.
 contract DoubleSineMathTest is Test {
-    uint256 constant V0 = DoubleSineMath.VIRTUAL_ETH_INIT;
-    uint256 constant K = DoubleSineMath.K;
+    uint256 internal constant V0 = DoubleSineMath.VIRTUAL_ETH_INIT;
+    uint256 internal constant K = DoubleSineMath.K;
+    MathHarness internal harness = new MathHarness();
 
     // ============================================================
     // Spot price
@@ -74,6 +75,48 @@ contract DoubleSineMathTest is Test {
         // Round-trip should give back ~ethIn (up to integer rounding in two
         // separate K-divisions).
         _assertApproxRel(ethBack, ethIn, 5, "buy/sell round trip");
+    }
+
+    function test_spotPrice_handlesLargestSafeMultiplicationBoundary() public pure {
+        uint256 virtualEth = DoubleSineMath.MAX_SPOT_PRICE_VIRTUAL_ETH;
+
+        uint256 price = DoubleSineMath.spotPrice(virtualEth);
+
+        assertEq(price, (virtualEth * virtualEth) / DoubleSineMath.PRICE_DENOMINATOR, "spot price boundary");
+    }
+
+    function test_spotPrice_revertsWhenMultiplicationWouldOverflow() public {
+        vm.expectRevert(DoubleSineMath.SpotPriceOverflow.selector);
+        harness.spotPrice(DoubleSineMath.MAX_SPOT_PRICE_VIRTUAL_ETH + 1);
+    }
+
+    function test_tokensOutForEth_handlesLargeVirtualEthWithoutIntermediateOverflow() public pure {
+        uint256 virtualEth = 1 << 128;
+        uint256 ethIn = 1e30;
+
+        uint256 out = DoubleSineMath.tokensOutForEth(virtualEth, ethIn);
+
+        assertEq(out, (K / virtualEth) - (K / (virtualEth + ethIn)), "large virtualEth token out");
+    }
+
+    function test_tokensOutForEth_revertsOnInvalidVirtualEth() public {
+        vm.expectRevert(DoubleSineMath.InvalidVirtualEth.selector);
+        harness.tokensOutForEth(0, 1);
+    }
+
+    function test_tokensOutForEth_revertsOnVirtualEthOverflow() public {
+        vm.expectRevert(DoubleSineMath.VirtualEthOverflow.selector);
+        harness.tokensOutForEth(type(uint256).max, 1);
+    }
+
+    function test_ethOutForTokens_revertsOnInvalidVirtualEth() public {
+        vm.expectRevert(DoubleSineMath.InvalidVirtualEth.selector);
+        harness.ethOutForTokens(0, 1);
+    }
+
+    function test_ethOutForTokens_revertsOnVirtualTokenOverflow() public {
+        vm.expectRevert(DoubleSineMath.VirtualTokenOverflow.selector);
+        harness.ethOutForTokens(V0, type(uint256).max);
     }
 
     function test_buyMakesPriceGoUp() public pure {
@@ -150,5 +193,19 @@ contract DoubleSineMathTest is Test {
             return;
         }
         require(diff * 10000 <= b * bpsTol, msg_);
+    }
+}
+
+contract MathHarness {
+    function spotPrice(uint256 virtualEth) external pure returns (uint256) {
+        return DoubleSineMath.spotPrice(virtualEth);
+    }
+
+    function tokensOutForEth(uint256 virtualEth, uint256 ethIn) external pure returns (uint256) {
+        return DoubleSineMath.tokensOutForEth(virtualEth, ethIn);
+    }
+
+    function ethOutForTokens(uint256 virtualEth, uint256 tokensIn) external pure returns (uint256) {
+        return DoubleSineMath.ethOutForTokens(virtualEth, tokensIn);
     }
 }

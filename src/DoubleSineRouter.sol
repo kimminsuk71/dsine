@@ -58,6 +58,7 @@ contract DoubleSineRouter is IUnlockCallback {
     error EthTransferFailed();
     error TokenTransferFailed();
     error SystemAddressMustHaveCode();
+    error DirectEthDisabled();
 
     constructor(IPoolManager manager_) {
         if (address(manager_) == address(0)) revert ZeroAddress();
@@ -66,7 +67,9 @@ contract DoubleSineRouter is IUnlockCallback {
         binder = msg.sender;
     }
 
-    receive() external payable {}
+    receive() external payable {
+        revert DirectEthDisabled();
+    }
 
     function bindSystem(DoubleSineToken tokenA_, DoubleSineToken tokenB_, address hook_) external {
         if (address(tokenA) != address(0)) revert AlreadyBound();
@@ -81,8 +84,11 @@ contract DoubleSineRouter is IUnlockCallback {
             tokenA_.poolManager() != address(manager) || tokenB_.poolManager() != address(manager)
                 || tokenA_.router() != address(this) || tokenB_.router() != address(this)
         ) revert InvalidBinding();
-        (address hookManager, address hookTokenA, address hookTokenB) = _readHookBinding(hook_);
-        if (hookManager != address(manager) || hookTokenA != address(tokenA_) || hookTokenB != address(tokenB_)) {
+        (address hookManager, address hookRouter, address hookTokenA, address hookTokenB) = _readHookBinding(hook_);
+        if (
+            hookManager != address(manager) || hookRouter != address(this) || hookTokenA != address(tokenA_)
+                || hookTokenB != address(tokenB_)
+        ) {
             revert InvalidBinding();
         }
         tokenA = tokenA_;
@@ -189,11 +195,16 @@ contract DoubleSineRouter is IUnlockCallback {
     function _readHookBinding(address hook_)
         private
         view
-        returns (address hookManager, address hookTokenA, address hookTokenB)
+        returns (address hookManager, address hookRouter, address hookTokenA, address hookTokenB)
     {
         IDoubleSineHookBinding hookBinding = IDoubleSineHookBinding(hook_);
         try hookBinding.manager() returns (address manager_) {
             hookManager = manager_;
+        } catch {
+            revert InvalidBinding();
+        }
+        try hookBinding.router() returns (address router_) {
+            hookRouter = router_;
         } catch {
             revert InvalidBinding();
         }

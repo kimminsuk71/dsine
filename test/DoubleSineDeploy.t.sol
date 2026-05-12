@@ -6,6 +6,7 @@ import {Test, console2} from "forge-std/Test.sol";
 import {PoolManager} from "v4-core/PoolManager.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
+import {CustomRevert} from "v4-core/libraries/CustomRevert.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
@@ -22,7 +23,7 @@ import {AtomicDoubleSineDeployer} from "../script/DeployDoubleSine.s.sol";
 /// @notice Full-fidelity dry run of the production deployment flow. Exercises
 /// the EXACT same sequence the deploy script will run on mainnet/Sepolia:
 ///   1. deploy router
-///   2. deploy tokens with locked authorization list
+///   2. deploy plain ERC20 tokens
 ///   3. mine a CREATE2 salt for the hook
 ///   4. CREATE2-deploy hook
 ///   5. bindHook on both tokens
@@ -46,14 +47,17 @@ contract DoubleSineDeployTest is Test {
 
     function test_atomicLaunchFlow() public {
         PoolManager manager = new PoolManager(address(this));
+        address owner = makeAddr("launch-owner");
+        vm.prank(owner, owner);
         AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
-        address beneficiary = makeAddr("beneficiary");
+        address beneficiary = owner;
 
         address predictedRouter = vm.computeCreateAddress(address(launcher), 1);
         address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
         address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
         bytes memory ctorArgs = abi.encode(
             IPoolManager(address(manager)),
+            predictedRouter,
             DoubleSineToken(predictedTokenA),
             DoubleSineToken(predictedTokenB),
             address(launcher)
@@ -62,11 +66,11 @@ contract DoubleSineDeployTest is Test {
             HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
 
         uint256 firstBuyWei = ANTI_SNIPE_MAX_BUY_WEI;
+        vm.deal(owner, firstBuyWei * 2);
+        vm.prank(owner, owner);
         AtomicDoubleSineDeployer.Deployment memory deployment = launcher.launch{value: firstBuyWei * 2}(
             AtomicDoubleSineDeployer.LaunchParams({
                 poolManager: address(manager),
-                permit2: address(0),
-                universalRouter: address(0),
                 beneficiary: beneficiary,
                 hookSalt: salt,
                 expectedHook: expectedHook,
@@ -97,8 +101,7 @@ contract DoubleSineDeployTest is Test {
     function test_hookConstructorRejectsDuplicateTokens() public {
         PoolManager manager = new PoolManager(address(this));
         DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
-        address[] memory auth = new address[](0);
-        DoubleSineToken token = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
+        DoubleSineToken token = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router));
 
         address hookAddr = address(
             uint160(
@@ -109,31 +112,20 @@ contract DoubleSineDeployTest is Test {
         vm.expectRevert(DoubleSineHook.DuplicateToken.selector);
         deployCodeTo(
             "DoubleSineHook.sol:DoubleSineHook",
-            abi.encode(IPoolManager(address(manager)), token, token, address(this)),
+            abi.encode(IPoolManager(address(manager)), address(router), token, token, address(this)),
             hookAddr
         );
-    }
-
-    function test_tokenConstructorRejectsAuthorizedAddressWithoutCode() public {
-        PoolManager manager = new PoolManager(address(this));
-        DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
-        address[] memory auth = new address[](1);
-        auth[0] = makeAddr("future-contract");
-
-        vm.expectRevert(DoubleSineToken.AuthorizedMustHaveCode.selector);
-        new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
     }
 
     function test_tokenConstructorRejectsSystemAddressWithoutCode() public {
         PoolManager manager = new PoolManager(address(this));
         DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
-        address[] memory auth = new address[](0);
 
         vm.expectRevert(DoubleSineToken.SystemAddressMustHaveCode.selector);
-        new DoubleSineToken("DoubleSine A", "DSA", makeAddr("fake-manager"), address(router), auth);
+        new DoubleSineToken("DoubleSine A", "DSA", makeAddr("fake-manager"), address(router));
 
         vm.expectRevert(DoubleSineToken.SystemAddressMustHaveCode.selector);
-        new DoubleSineToken("DoubleSine A", "DSA", address(manager), makeAddr("fake-router"), auth);
+        new DoubleSineToken("DoubleSine A", "DSA", address(manager), makeAddr("fake-router"));
     }
 
     function test_routerConstructorRejectsManagerWithoutCode() public {
@@ -144,23 +136,64 @@ contract DoubleSineDeployTest is Test {
     function test_hookConstructorRejectsSystemAddressWithoutCode() public {
         PoolManager manager = new PoolManager(address(this));
         DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
-        address[] memory auth = new address[](0);
-        DoubleSineToken token = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
-        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router), auth);
+        DoubleSineToken token = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router));
+        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router));
 
         vm.expectRevert(DoubleSineHook.SystemAddressMustHaveCode.selector);
-        new DoubleSineHook(IPoolManager(makeAddr("fake-manager")), token, tokenB, address(this));
+        new DoubleSineHook(IPoolManager(makeAddr("fake-manager")), address(router), token, tokenB, address(this));
     }
 
-    function test_atomicLaunchRejectsAuthorizedAddressWithoutCode() public {
+    function test_hookRejectsNonOneToOneInitialPoolPrice() public {
         PoolManager manager = new PoolManager(address(this));
-        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
-        address beneficiary = makeAddr("beneficiary");
+        DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
+        DoubleSineToken tokenA = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router));
+        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router));
 
+        bytes memory ctorArgs =
+            abi.encode(IPoolManager(address(manager)), address(router), tokenA, tokenB, address(this));
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(this), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+        DoubleSineHook hook = new DoubleSineHook{salt: salt}(
+            IPoolManager(address(manager)), address(router), tokenA, tokenB, address(this)
+        );
+        require(address(hook) == expectedHook, "hook address mismatch");
+        router.bindSystem(tokenA, tokenB, address(hook));
+        tokenA.bindHook(address(hook));
+        tokenB.bindHook(address(hook));
+
+        PoolKey memory keyA = PoolKey({
+            currency0: CurrencyLibrary.ADDRESS_ZERO,
+            currency1: Currency.wrap(address(tokenA)),
+            fee: 0,
+            tickSpacing: 1,
+            hooks: IHooks(address(hook))
+        });
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(hook),
+                IHooks.afterInitialize.selector,
+                abi.encodeWithSelector(DoubleSineHook.InvalidInitialPrice.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        manager.initialize(keyA, SQRT_PRICE_1_1 + 1);
+    }
+
+    function test_atomicLaunchTokensArePlainERC20ForExternalContracts() public {
+        PoolManager manager = new PoolManager(address(this));
+        address owner = makeAddr("launch-owner");
+        vm.prank(owner, owner);
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+        FakeIntegration externalVenue = new FakeIntegration();
+
+        address predictedRouter = vm.computeCreateAddress(address(launcher), 1);
         address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
         address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
         bytes memory ctorArgs = abi.encode(
             IPoolManager(address(manager)),
+            predictedRouter,
             DoubleSineToken(predictedTokenA),
             DoubleSineToken(predictedTokenB),
             address(launcher)
@@ -168,13 +201,51 @@ contract DoubleSineDeployTest is Test {
         (address expectedHook, bytes32 salt) =
             HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
 
-        vm.expectRevert(DoubleSineToken.AuthorizedMustHaveCode.selector);
+        vm.deal(owner, ANTI_SNIPE_MAX_BUY_WEI * 2);
+        vm.prank(owner, owner);
+        AtomicDoubleSineDeployer.Deployment memory deployment = launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                beneficiary: owner,
+                hookSalt: salt,
+                expectedHook: expectedHook,
+                firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
+            })
+        );
+
+        DoubleSineToken tokenA = DoubleSineToken(deployment.tokenA);
+        uint256 amount = tokenA.balanceOf(owner) / 2;
+
+        vm.prank(owner, owner);
+        assertTrue(tokenA.transfer(address(externalVenue), amount), "transfer to external venue");
+
+        externalVenue.route(tokenA, owner, amount);
+        assertEq(tokenA.balanceOf(address(externalVenue)), 0, "external venue emptied");
+        assertGt(tokenA.balanceOf(owner), 0, "owner recovered tokens");
+    }
+
+    function test_atomicLaunchRequiresOwnerBeneficiary() public {
+        PoolManager manager = new PoolManager(address(this));
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+
+        address predictedRouter = vm.computeCreateAddress(address(launcher), 1);
+        address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
+        address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
+        bytes memory ctorArgs = abi.encode(
+            IPoolManager(address(manager)),
+            predictedRouter,
+            DoubleSineToken(predictedTokenA),
+            DoubleSineToken(predictedTokenB),
+            address(launcher)
+        );
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+
+        vm.expectRevert(AtomicDoubleSineDeployer.BeneficiaryMustBeOwner.selector);
         launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2}(
             AtomicDoubleSineDeployer.LaunchParams({
                 poolManager: address(manager),
-                permit2: makeAddr("fake-permit2"),
-                universalRouter: address(0),
-                beneficiary: beneficiary,
+                beneficiary: makeAddr("not-owner-beneficiary"),
                 hookSalt: salt,
                 expectedHook: expectedHook,
                 firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
@@ -185,12 +256,13 @@ contract DoubleSineDeployTest is Test {
     function test_atomicLaunchOnlyOwnerCanLaunch() public {
         PoolManager manager = new PoolManager(address(this));
         AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
-        address beneficiary = makeAddr("beneficiary");
 
+        address predictedRouter = vm.computeCreateAddress(address(launcher), 1);
         address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
         address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
         bytes memory ctorArgs = abi.encode(
             IPoolManager(address(manager)),
+            predictedRouter,
             DoubleSineToken(predictedTokenA),
             DoubleSineToken(predictedTokenB),
             address(launcher)
@@ -204,14 +276,20 @@ contract DoubleSineDeployTest is Test {
         launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2}(
             AtomicDoubleSineDeployer.LaunchParams({
                 poolManager: address(manager),
-                permit2: address(0),
-                universalRouter: address(0),
-                beneficiary: beneficiary,
+                beneficiary: address(this),
                 hookSalt: salt,
                 expectedHook: expectedHook,
                 firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
             })
         );
+    }
+
+    function test_atomicLauncherRejectsDirectEth() public {
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+
+        (bool ok, bytes memory revertData) = address(launcher).call{value: 1 wei}("");
+        assertFalse(ok, "direct eth should revert");
+        assertEq(revertData, abi.encodeWithSelector(AtomicDoubleSineDeployer.DirectEthDisabled.selector));
     }
 
     function test_fullDeploymentFlow() public {
@@ -222,24 +300,25 @@ contract DoubleSineDeployTest is Test {
         DoubleSineRouter router = new DoubleSineRouter(IPoolManager(address(manager)));
 
         // ============================================================
-        // 2. Tokens with locked authorization list
+        // 2. Plain ERC20 tokens
         // ============================================================
-        address[] memory auth = new address[](0);
-        DoubleSineToken tokenA = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router), auth);
-        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router), auth);
+        DoubleSineToken tokenA = new DoubleSineToken("DoubleSine A", "DSA", address(manager), address(router));
+        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", address(manager), address(router));
 
         // ============================================================
         // 3. Mine the CREATE2 salt
         // ============================================================
-        bytes memory ctorArgs = abi.encode(IPoolManager(address(manager)), tokenA, tokenB, address(this));
+        bytes memory ctorArgs =
+            abi.encode(IPoolManager(address(manager)), address(router), tokenA, tokenB, address(this));
         (address expectedHook, bytes32 salt) =
             HookMiner.find(address(this), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
 
         // ============================================================
         // 4. CREATE2 deploy
         // ============================================================
-        DoubleSineHook hook =
-            new DoubleSineHook{salt: salt}(IPoolManager(address(manager)), tokenA, tokenB, address(this));
+        DoubleSineHook hook = new DoubleSineHook{salt: salt}(
+            IPoolManager(address(manager)), address(router), tokenA, tokenB, address(this)
+        );
         require(address(hook) == expectedHook, "hook address mismatch");
         router.bindSystem(tokenA, tokenB, address(hook));
 
@@ -326,5 +405,12 @@ contract DoubleSineDeployTest is Test {
         } catch {
             return true;
         }
+    }
+}
+
+contract FakeIntegration {
+    function route(DoubleSineToken token, address to, uint256 amount) external {
+        bool ok = token.transfer(to, amount);
+        require(ok, "route failed");
     }
 }

@@ -22,8 +22,8 @@ import {HookMiner} from "./utils/HookMiner.sol";
 ///
 /// Env vars:
 ///   POOL_MANAGER     - v4 PoolManager on this chain (required)
-///   PERMIT2          - optional token auth entry for integrations
-///   UNIVERSAL_ROUTER - optional token auth entry for integrations
+///   PERMIT2          - ignored; tokens are freely transferable
+///   UNIVERSAL_ROUTER - ignored; tokens are freely transferable
 ///   PRIVATE_KEY      - deployer signer (set via --private-key flag instead)
 ///
 /// Run with:
@@ -43,11 +43,7 @@ contract DeployDoubleSine is Script {
 
     function run() external {
         address poolManager = vm.envAddress("POOL_MANAGER");
-        address permit2 = vm.envOr("PERMIT2", address(0));
-        address universalRouter = vm.envOr("UNIVERSAL_ROUTER", address(0));
         uint256 firstBuyWei = vm.envOr("FIRST_BUY", ANTI_SNIPE_MAX_BUY_WEI);
-        address deployer = msg.sender;
-
         // ============================================================
         // 1. Deploy the launch executor. This transaction is not market
         //    sensitive because no tokens or pools exist yet.
@@ -55,7 +51,9 @@ contract DeployDoubleSine is Script {
         vm.startBroadcast();
         AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
         vm.stopBroadcast();
+        address deployer = launcher.owner();
         console2.log("AtomicDoubleSineDeployer:", address(launcher));
+        console2.log("Launch owner:", deployer);
 
         // ============================================================
         // 2. Predict launch-created addresses and mine the hook salt
@@ -68,6 +66,7 @@ contract DeployDoubleSine is Script {
 
         bytes memory ctorArgs = abi.encode(
             IPoolManager(poolManager),
+            predictedRouter,
             DoubleSineToken(predictedTokenA),
             DoubleSineToken(predictedTokenB),
             address(launcher)
@@ -93,8 +92,6 @@ contract DeployDoubleSine is Script {
         AtomicDoubleSineDeployer.Deployment memory deployment = launcher.launch{value: firstBuyWei * 2}(
             AtomicDoubleSineDeployer.LaunchParams({
                 poolManager: poolManager,
-                permit2: permit2,
-                universalRouter: universalRouter,
                 beneficiary: deployer,
                 hookSalt: salt,
                 expectedHook: expectedHook,
@@ -132,8 +129,6 @@ contract AtomicDoubleSineDeployer {
 
     struct LaunchParams {
         address poolManager;
-        address permit2;
-        address universalRouter;
         address beneficiary;
         bytes32 hookSalt;
         address expectedHook;
@@ -160,8 +155,12 @@ contract AtomicDoubleSineDeployer {
     error TokenTransferFailed();
     error EthTransferFailed();
     error OnlyOwner();
+    error BeneficiaryMustBeOwner();
+    error DirectEthDisabled();
 
-    receive() external payable {}
+    receive() external payable {
+        revert DirectEthDisabled();
+    }
 
     constructor() {
         owner = msg.sender;
@@ -171,23 +170,18 @@ contract AtomicDoubleSineDeployer {
     function launch(LaunchParams calldata params) external payable returns (Deployment memory deployment) {
         if (msg.sender != owner) revert OnlyOwner();
         if (params.poolManager == address(0) || params.beneficiary == address(0)) revert ZeroAddress();
+        if (params.beneficiary != owner) revert BeneficiaryMustBeOwner();
         if (params.firstBuyWei > ANTI_SNIPE_MAX_BUY_WEI) revert FirstBuyTooLarge();
         if (msg.value < params.firstBuyWei * 2) revert InsufficientEth();
 
         DoubleSineRouter router = new DoubleSineRouter(IPoolManager(params.poolManager));
 
-        uint256 authLen = 1 + (params.permit2 != address(0) ? 1 : 0) + (params.universalRouter != address(0) ? 1 : 0);
-        address[] memory auth = new address[](authLen);
-        uint256 idx = 0;
-        auth[idx++] = address(this);
-        if (params.permit2 != address(0)) auth[idx++] = params.permit2;
-        if (params.universalRouter != address(0)) auth[idx++] = params.universalRouter;
+        DoubleSineToken tokenA = new DoubleSineToken("DoubleSine A", "DSA", params.poolManager, address(router));
+        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", params.poolManager, address(router));
 
-        DoubleSineToken tokenA = new DoubleSineToken("DoubleSine A", "DSA", params.poolManager, address(router), auth);
-        DoubleSineToken tokenB = new DoubleSineToken("DoubleSine B", "DSB", params.poolManager, address(router), auth);
-
-        DoubleSineHook hook =
-            new DoubleSineHook{salt: params.hookSalt}(IPoolManager(params.poolManager), tokenA, tokenB, address(this));
+        DoubleSineHook hook = new DoubleSineHook{salt: params.hookSalt}(
+            IPoolManager(params.poolManager), address(router), tokenA, tokenB, address(this)
+        );
         if (params.expectedHook != address(0) && address(hook) != params.expectedHook) revert HookAddressMismatch();
 
         router.bindSystem(tokenA, tokenB, address(hook));

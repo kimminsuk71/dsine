@@ -28,6 +28,16 @@ library DoubleSineMath {
     uint256 internal constant VIRTUAL_ETH_INIT = 1e18; // 1 ETH
     uint256 internal constant VIRTUAL_TOKEN_INIT = 1e24; // 1M tokens (18 decimals)
     uint256 internal constant K = VIRTUAL_ETH_INIT * VIRTUAL_TOKEN_INIT; // 1e42
+    uint256 internal constant PRICE_DENOMINATOR = K / WAD; // 1e24
+
+    // Largest virtualEth that can be squared before division without
+    // overflowing uint256.
+    uint256 internal constant MAX_SPOT_PRICE_VIRTUAL_ETH = uint256(type(uint128).max);
+
+    error InvalidVirtualEth();
+    error VirtualEthOverflow();
+    error VirtualTokenOverflow();
+    error SpotPriceOverflow();
 
     // ============================================================
     // Pure curve math (no state)
@@ -36,26 +46,32 @@ library DoubleSineMath {
     /// Spot price in WAD: ETH per token at the given virtualEth.
     ///   priceWAD = (virtualEth / virtualTokens) * WAD
     ///           = virtualEth^2 * WAD / K
+    ///           = virtualEth^2 / PRICE_DENOMINATOR
     /// Both virtualEth and virtualTokens are 1e18-scaled, so the raw ratio
     /// already represents ETH-per-token; we scale by WAD for fixed-point.
     function spotPrice(uint256 virtualEth) internal pure returns (uint256) {
-        return (virtualEth * virtualEth * WAD) / K;
+        if (virtualEth > MAX_SPOT_PRICE_VIRTUAL_ETH) revert SpotPriceOverflow();
+        return (virtualEth * virtualEth) / PRICE_DENOMINATOR;
     }
 
     /// Tokens minted out for ethIn pushed into the curve.
     ///   tokensOut = oldVirtualTokens - newVirtualTokens
     ///             = K/virtualEth - K/(virtualEth + ethIn)
-    ///             = K * ethIn / (virtualEth * (virtualEth + ethIn))
     function tokensOutForEth(uint256 virtualEth, uint256 ethIn) internal pure returns (uint256) {
+        if (virtualEth == 0) revert InvalidVirtualEth();
+        if (ethIn > type(uint256).max - virtualEth) revert VirtualEthOverflow();
         uint256 newVE = virtualEth + ethIn;
-        return (K * ethIn) / (virtualEth * newVE);
+        return (K / virtualEth) - (K / newVE);
     }
 
     /// ETH paid out for tokensIn burned from the curve.
     ///   ethOut = virtualEth - newVirtualEth
     ///          = virtualEth - K/(K/virtualEth + tokensIn)
     function ethOutForTokens(uint256 virtualEth, uint256 tokensIn) internal pure returns (uint256) {
+        if (virtualEth == 0) revert InvalidVirtualEth();
+        if (tokensIn == 0) return 0;
         uint256 oldVT = K / virtualEth;
+        if (tokensIn > type(uint256).max - oldVT) revert VirtualTokenOverflow();
         uint256 newVT = oldVT + tokensIn;
         uint256 newVE = K / newVT;
         return virtualEth - newVE;

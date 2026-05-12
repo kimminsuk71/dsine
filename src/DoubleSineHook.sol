@@ -30,12 +30,14 @@ import {DoubleSineToken} from "./DoubleSineToken.sol";
 ///   priceA(virtualEth) == priceB(virtualEth) always
 contract DoubleSineHook is IHooks {
     IPoolManager public immutable manager;
+    address public immutable router;
     DoubleSineToken public immutable tokenA;
     DoubleSineToken public immutable tokenB;
     address public immutable initializer;
 
     int24 public constant TICK_SPACING = 1;
     uint24 public constant POOL_FEE = 0;
+    uint160 public constant INITIAL_SQRT_PRICE_X96 = 79228162514264337593543950336;
 
     // Trader-side fees in basis points (10000 = 100%). Skimmed before
     // the curve sees the trade size; retained in ethReserve as protocol
@@ -98,19 +100,29 @@ contract DoubleSineHook is IHooks {
     error Int128Overflow();
     error ExactInputOverflow();
     error SystemAddressMustHaveCode();
+    error InvalidInitialPrice();
+    error DirectEthDisabled();
 
-    constructor(IPoolManager manager_, DoubleSineToken tokenA_, DoubleSineToken tokenB_, address initializer_) {
+    constructor(
+        IPoolManager manager_,
+        address router_,
+        DoubleSineToken tokenA_,
+        DoubleSineToken tokenB_,
+        address initializer_
+    ) {
         if (
-            address(manager_) == address(0) || address(tokenA_) == address(0) || address(tokenB_) == address(0)
-                || initializer_ == address(0)
+            address(manager_) == address(0) || router_ == address(0) || address(tokenA_) == address(0)
+                || address(tokenB_) == address(0) || initializer_ == address(0)
         ) revert ZeroAddress();
         if (
-            address(manager_).code.length == 0 || address(tokenA_).code.length == 0 || address(tokenB_).code.length == 0
+            address(manager_).code.length == 0 || router_.code.length == 0 || address(tokenA_).code.length == 0
+                || address(tokenB_).code.length == 0
         ) {
             revert SystemAddressMustHaveCode();
         }
         if (address(tokenA_) == address(tokenB_)) revert DuplicateToken();
         manager = manager_;
+        router = router_;
         tokenA = tokenA_;
         tokenB = tokenB_;
         initializer = initializer_;
@@ -137,7 +149,9 @@ contract DoubleSineHook is IHooks {
         );
     }
 
-    receive() external payable {}
+    receive() external payable {
+        if (msg.sender != address(manager)) revert DirectEthDisabled();
+    }
 
     modifier onlyPoolManager() {
         if (msg.sender != address(manager)) revert OnlyPoolManager();
@@ -152,13 +166,14 @@ contract DoubleSineHook is IHooks {
         revert HookNotImplemented();
     }
 
-    function afterInitialize(address sender, PoolKey calldata key, uint160, int24)
+    function afterInitialize(address sender, PoolKey calldata key, uint160 sqrtPriceX96, int24 tick)
         external
         override
         onlyPoolManager
         returns (bytes4)
     {
         if (sender != initializer) revert OnlyInitializer();
+        if (sqrtPriceX96 != INITIAL_SQRT_PRICE_X96 || tick != 0) revert InvalidInitialPrice();
 
         bool isA = false;
         if (Currency.unwrap(key.currency1) == address(tokenA)) {
@@ -254,6 +269,7 @@ contract DoubleSineHook is IHooks {
         internal
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        if (ethIn > uint256(uint128(type(int128).max))) revert Int128Overflow();
         // Anti-sniper cap: during the first ANTI_SNIPE_BLOCKS after pool
         // init, any single buy input is capped to ANTI_SNIPE_MAX_BUY_WEI.
         // The cap applies symmetrically to both A and B pools (one shared
@@ -266,8 +282,15 @@ contract DoubleSineHook is IHooks {
         // the constant-product reserve and determines tokensOut.
         uint256 fee = (ethIn * BUY_FEE_BPS) / 10000;
         uint256 ethCurve = ethIn - fee;
+        if (
+            virtualEth > DoubleSineMath.MAX_SPOT_PRICE_VIRTUAL_ETH
+                || ethCurve > DoubleSineMath.MAX_SPOT_PRICE_VIRTUAL_ETH - virtualEth
+        ) {
+            revert DoubleSineMath.SpotPriceOverflow();
+        }
 
         uint256 tokenOut = DoubleSineMath.tokensOutForEth(virtualEth, ethCurve);
+        if (tokenOut > uint256(uint128(type(int128).max))) revert Int128Overflow();
         if (tokenOut < minTokensOut) revert Slippage();
         virtualEth += ethCurve;
         ethReserve += ethIn;
@@ -288,10 +311,12 @@ contract DoubleSineHook is IHooks {
         internal
         returns (bytes4, BeforeSwapDelta, uint24)
     {
+        if (tokenIn > uint256(uint128(type(int128).max))) revert Int128Overflow();
         // Curve gives the gross ETH for these tokens at current state.
         uint256 ethGross = DoubleSineMath.ethOutForTokens(virtualEth, tokenIn);
         uint256 fee = (ethGross * SELL_FEE_BPS) / 10000;
         uint256 ethOut = ethGross - fee;
+        if (ethOut > uint256(uint128(type(int128).max))) revert Int128Overflow();
         if (ethOut < minEthOut) revert Slippage();
 
         // The curve is "owed" ethGross worth of ETH. Don't let the seller
