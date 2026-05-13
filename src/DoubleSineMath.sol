@@ -20,7 +20,7 @@ pragma solidity ^0.8.26;
 ///   Starting price = 1e-6 ETH per token (= 1 microETH = 1000 gwei)
 ///
 /// Shape: flat at first, parabolic upward as buys accumulate. Spot price
-/// at virtualEth = V is V^2 / K. Doubles every time virtualEth doubles.
+/// at virtualEth = V is V^2 / K. Quadruples every time virtualEth doubles.
 library DoubleSineMath {
     uint256 internal constant WAD = 1e18;
 

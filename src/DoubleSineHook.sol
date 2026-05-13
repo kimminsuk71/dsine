@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {FullMath} from "v4-core/libraries/FullMath.sol";
 import {Currency} from "v4-core/types/Currency.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId} from "v4-core/types/PoolId.sol";
@@ -53,7 +54,7 @@ contract DoubleSineHook is IHooks {
     /// Block number at which the FIRST canonical pool was initialized.
     /// Used as the anchor for the anti-snipe window; set once and never
     /// reset. Both pools (A and B) share this anchor.
-    uint64 public bootstrapBlock;
+    uint256 public bootstrapBlock;
 
     /// Anti-sniper window: number of blocks after bootstrap during which
     /// per-swap buy size is capped. 5 blocks * 12s/block ~= 60s on mainnet.
@@ -103,6 +104,7 @@ contract DoubleSineHook is IHooks {
     error InvalidInitialPrice();
     error DirectEthDisabled();
     error ZeroOutput();
+    error SystemNotReady();
 
     constructor(
         IPoolManager manager_,
@@ -204,7 +206,7 @@ contract DoubleSineHook is IHooks {
         // pools are deployed in the same tx in our launch path, so this
         // protects both. Don't reset on the second pool's init.
         if (bootstrapBlock == 0) {
-            bootstrapBlock = uint64(block.number);
+            bootstrapBlock = block.number;
         }
         emit PoolInitialized(isA, pid);
         return IHooks.afterInitialize.selector;
@@ -243,6 +245,7 @@ contract DoubleSineHook is IHooks {
         returns (bytes4, BeforeSwapDelta, uint24)
     {
         bool isA = _classifyPool(key);
+        if (!poolAInitialized || !poolBInitialized) revert SystemNotReady();
         if (params.amountSpecified >= 0) revert ExactOutputDisabled();
         if (params.amountSpecified == type(int256).min) revert ExactInputOverflow();
         uint256 amountIn = uint256(-params.amountSpecified);
@@ -275,7 +278,7 @@ contract DoubleSineHook is IHooks {
         // init, any single buy input is capped to ANTI_SNIPE_MAX_BUY_WEI.
         // The cap applies symmetrically to both A and B pools (one shared
         // bootstrapBlock). Sells are unaffected.
-        if (uint64(block.number) - bootstrapBlock < ANTI_SNIPE_BLOCKS) {
+        if (block.number - bootstrapBlock < ANTI_SNIPE_BLOCKS) {
             if (ethIn > ANTI_SNIPE_MAX_BUY_WEI) revert AntiSnipeBuyCapped();
         }
 
@@ -435,6 +438,6 @@ contract DoubleSineHook is IHooks {
 
     function _feeUp(uint256 amount, uint256 bps) internal pure returns (uint256) {
         if (amount == 0 || bps == 0) return 0;
-        return ((amount * bps) - 1) / 10000 + 1;
+        return FullMath.mulDivRoundingUp(amount, bps, 10000);
     }
 }

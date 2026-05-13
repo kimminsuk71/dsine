@@ -25,7 +25,8 @@ Twin-token system on Uniswap v4: two plain ERC20s (**DSA** and **DSB**) whose ca
 - **Plain ERC20 external trading** — DSA/DSB can be transferred to EOAs, contracts, DEX pools, aggregator routers, and custody venues without an owner authorization list.
 - **Canonical v4 Collider** — the official ETH/DSA and ETH/DSB v4 pools share one `virtualEth` state, so the hook enforces hard synchronization inside that path.
 - **Pump-style bonding curve** — single shared virtual reserve drives pricing; parabolic shape (flat at start, steeper as inflows accumulate).
-- **Anti-sniper window** — first 5 blocks after init cap per-swap buys at 0.001 ETH on both pools.
+- **Atomic market readiness** — swaps open only after both canonical pools are initialized.
+- **Anti-sniper window** — first 5 blocks after bootstrap cap per-swap buys at 0.001 ETH on both pools.
 - **No LP risk** — the hook *is* the AMM; `addLiquidity` reverts.
 - **Reserve permanent** — every nonzero swap pays a rounded-up 1% fee on each side; the reserve cannot drain below accumulated fees.
 - **Dust-safe rounding** — curve output rounds against traders and zero-output swaps revert instead of silently settling dust.
@@ -67,7 +68,7 @@ forge build
 forge test
 ```
 
-You should see **94 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **92 tests passing**:
+You should see **96 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **94 tests passing**:
 
 ```bash
 forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"
@@ -150,9 +151,10 @@ DSA/DSB are standard transferable ERC20s, so aggregators and GMGN-style routers 
 - **Dust protection**: hook swaps reject zero-output buys/sells, and trader-side fees round up so input splitting cannot bypass the 1% fee.
 - **v4 delta bounds**: hook swaps reject amounts that cannot fit in v4 `int128` balance deltas before state changes or settlement.
 - **Initial pool price guard**: canonical v4 pools must initialize at 1:1 tick 0, so the registered pool state cannot drift from deployment assumptions or external indexer expectations.
+- **Market readiness guard**: swaps revert until both canonical ETH/DSA and ETH/DSB pools are initialized, preventing a partially launched system from trading only one side.
 - **Mint/burn authority**: `onlyHook` modifier plus hook-custody source/target checks — even a buggy hook can't mint to or burn from arbitrary addresses.
 - **Reserve invariant**: `address(hook).balance == ethReserve` for clean trading paths. Direct ETH transfers to the hook are rejected unless they come from PoolManager settlement.
-- **Anti-sniper**: 5-block window enforces 0.001 ETH cap on per-swap buys. Both pools share one bootstrap anchor.
+- **Anti-sniper**: 5-block window enforces 0.001 ETH cap on per-swap buys. Both pools share one full-width bootstrap block anchor with no `uint64` truncation.
 - **CREATE2 mining**: the hook address self-encodes its permission flags, verified by Uniswap's `Hooks.validateHookPermissions` in the constructor.
 
 Audited in-house. **Not yet independently audited** — recommend an external review before mainnet deployment with significant TVL.

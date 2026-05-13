@@ -699,6 +699,8 @@ const state = {
   series: []
 };
 
+let liveSession = null;
+
 function divUp(numerator, denominator) {
   return numerator === 0n ? 0n : ((numerator - 1n) / denominator) + 1n;
 }
@@ -767,6 +769,7 @@ function formatToken(value) {
 }
 
 function reset() {
+  stopLiveSession();
   state.mode = "simulation";
   state.virtualEth = VIRTUAL_ETH_INIT;
   state.ethReserve = 0n;
@@ -781,6 +784,17 @@ function reset() {
   setModePill("Simulation", false);
   setStatus("");
   redraw();
+}
+
+function stopLiveSession() {
+  if (!liveSession) return;
+  if (liveSession.timer) window.clearInterval(liveSession.timer);
+  if (liveSession.hook) liveSession.hook.removeAllListeners("Buy");
+  if (liveSession.hook) liveSession.hook.removeAllListeners("Sell");
+  liveSession = null;
+  el("liveStatusPill").textContent = "offline";
+  el("liveStatusPill").classList.remove("live");
+  el("liveStatus").textContent = "";
 }
 
 function setModePill(text, live) {
@@ -1126,8 +1140,18 @@ window.connectLive = async function connectLive(rpcUrl, hookAddress, hookAbi = D
   const provider = new ethers.JsonRpcProvider(rpcUrl);
   const hook = new ethers.Contract(hookAddress, hookAbi, provider);
 
-  reset();
+  stopLiveSession();
   state.mode = "live";
+  state.virtualEth = VIRTUAL_ETH_INIT;
+  state.ethReserve = 0n;
+  state.walletEth = WALLET_ETH_INIT;
+  state.balA = 0n;
+  state.balB = 0n;
+  state.supplyA = 0n;
+  state.supplyB = 0n;
+  state.feesPaid = 0n;
+  state.events = [];
+  state.series = [];
   setModePill("Live", true);
   el("liveStatusPill").textContent = "online";
   el("liveStatusPill").classList.add("live");
@@ -1137,7 +1161,7 @@ window.connectLive = async function connectLive(rpcUrl, hookAddress, hookAbi = D
     const [vEth, reserve] = await Promise.all([hook.virtualEth(), hook.ethReserve()]);
     state.virtualEth = BigInt(vEth.toString());
     state.ethReserve = BigInt(reserve.toString());
-    if (state.series.length === 1 && state.events.length === 0) {
+    if (state.events.length === 0) {
       state.series = [{ step: 0, vEth: state.virtualEth, price: spotPrice(state.virtualEth) }];
     }
     redraw();
@@ -1145,6 +1169,7 @@ window.connectLive = async function connectLive(rpcUrl, hookAddress, hookAbi = D
 
   await pullState();
   const timer = window.setInterval(() => pullState().catch(() => {}), 12000);
+  liveSession = { provider, hook, timer };
 
   hook.on("Buy", (sender, isA, ethIn, tokenOut, virtualEthAfter, priceAfter) => {
     const side = isA ? "A" : "B";
@@ -1176,7 +1201,7 @@ window.connectLive = async function connectLive(rpcUrl, hookAddress, hookAbi = D
     redraw();
   });
 
-  return { provider, hook, timer };
+  return liveSession;
 };
 
 el("resetBtn").addEventListener("click", reset);

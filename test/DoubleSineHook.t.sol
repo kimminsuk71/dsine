@@ -19,6 +19,7 @@ import {DoubleSineMath} from "../src/DoubleSineMath.sol";
 import {DoubleSineToken} from "../src/DoubleSineToken.sol";
 import {DoubleSineHook} from "../src/DoubleSineHook.sol";
 import {DoubleSineRouter} from "../src/DoubleSineRouter.sol";
+import {HookMiner} from "../script/utils/HookMiner.sol";
 
 /// @notice End-to-end test: deploys V4 PoolManager, both tokens, the hook,
 /// and a router; initializes ETH/A and ETH/B pools; then drives buy/sell
@@ -47,6 +48,8 @@ contract DoubleSineHookTest is Test {
         Hooks.AFTER_INITIALIZE_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
             | Hooks.BEFORE_SWAP_FLAG | Hooks.BEFORE_SWAP_RETURNS_DELTA_FLAG
     );
+    uint256 internal constant HOOK_BOOTSTRAP_BLOCK_SLOT = 2;
+    uint256 internal constant HOOK_VIRTUAL_ETH_SLOT = 4;
 
     receive() external payable {}
 
@@ -403,7 +406,7 @@ contract DoubleSineHookTest is Test {
 
     function test_buyDustRevertsWhenCurveOutputRoundsToZero() public {
         uint256 highVirtualEth = 1e30;
-        vm.store(address(hook), bytes32(uint256(3)), bytes32(highVirtualEth));
+        vm.store(address(hook), bytes32(HOOK_VIRTUAL_ETH_SLOT), bytes32(highVirtualEth));
 
         uint256 reserveBefore = hook.ethReserve();
         uint256 userEthBefore = user.balance;
@@ -723,7 +726,7 @@ contract DoubleSineHookTest is Test {
 
     function test_hookRejectsBuyThatWouldExceedSpotPriceBoundBeforeStateChange() public {
         uint256 nearSpotPriceBound = DoubleSineMath.MAX_SPOT_PRICE_VIRTUAL_ETH - 1;
-        vm.store(address(hook), bytes32(uint256(3)), bytes32(nearSpotPriceBound));
+        vm.store(address(hook), bytes32(HOOK_VIRTUAL_ETH_SLOT), bytes32(nearSpotPriceBound));
 
         uint256 virtualEthBefore = hook.virtualEth();
         uint256 ethReserveBefore = hook.ethReserve();
@@ -762,6 +765,57 @@ contract DoubleSineHookTest is Test {
         assertEq(hook.ethReserve(), ethReserveBefore, "reserve changed");
     }
 
+    function test_hookRejectsSwapUntilBothCanonicalPoolsAreInitialized() public {
+        PoolManager freshManager = new PoolManager(address(this));
+        DoubleSineRouter freshRouter = new DoubleSineRouter(IPoolManager(address(freshManager)));
+        DoubleSineToken freshTokenA =
+            new DoubleSineToken("Fresh DoubleSine A", "FDSA", address(freshManager), address(freshRouter));
+        DoubleSineToken freshTokenB =
+            new DoubleSineToken("Fresh DoubleSine B", "FDSB", address(freshManager), address(freshRouter));
+
+        bytes memory ctorArgs = abi.encode(
+            IPoolManager(address(freshManager)), address(freshRouter), freshTokenA, freshTokenB, address(this)
+        );
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(this), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+        DoubleSineHook freshHook = new DoubleSineHook{salt: salt}(
+            IPoolManager(address(freshManager)), address(freshRouter), freshTokenA, freshTokenB, address(this)
+        );
+        require(address(freshHook) == expectedHook, "fresh hook address mismatch");
+        freshRouter.bindSystem(freshTokenA, freshTokenB, address(freshHook));
+        freshTokenA.bindHook(address(freshHook));
+        freshTokenB.bindHook(address(freshHook));
+
+        PoolKey memory freshKeyA = PoolKey({
+            currency0: CurrencyLibrary.ADDRESS_ZERO,
+            currency1: Currency.wrap(address(freshTokenA)),
+            fee: 0,
+            tickSpacing: 1,
+            hooks: IHooks(address(freshHook))
+        });
+        freshManager.initialize(freshKeyA, SQRT_PRICE_1_1);
+        vm.roll(block.number + freshHook.ANTI_SNIPE_BLOCKS());
+
+        vm.deal(user, 1 ether);
+        vm.prank(user, user);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                CustomRevert.WrappedError.selector,
+                address(freshHook),
+                IHooks.beforeSwap.selector,
+                abi.encodeWithSelector(DoubleSineHook.SystemNotReady.selector),
+                abi.encodeWithSelector(Hooks.HookCallFailed.selector)
+            )
+        );
+        freshRouter.swap{value: 0.01 ether}(
+            freshKeyA,
+            SwapParams({
+                zeroForOne: true, amountSpecified: _exactInput(0.01 ether), sqrtPriceLimitX96: MIN_PRICE_LIMIT
+            }),
+            ""
+        );
+    }
+
     // ============================================================
     // Anti-sniper: per-swap input cap during the first N blocks
     // ============================================================
@@ -790,6 +844,16 @@ contract DoubleSineHookTest is Test {
         // setUp already rolled past the window. Verify a big buy works.
         _buyA(user, 0.5 ether);
         assertGt(tokenA.balanceOf(user), 0, "post-window buy should work");
+    }
+
+    function test_antiSnipe_remainsActiveAtHighBlockNumbers() public {
+        uint256 highBlock = uint256(type(uint64).max) + 100;
+        vm.store(address(hook), bytes32(HOOK_BOOTSTRAP_BLOCK_SLOT), bytes32(highBlock));
+        vm.roll(highBlock);
+
+        bool reverted = _tryBuyA(user, hook.ANTI_SNIPE_MAX_BUY_WEI() + 1);
+
+        assertTrue(reverted, "high block cap should not truncate");
     }
 
     function test_antiSnipe_sellsNotCappedInWindow() public {
