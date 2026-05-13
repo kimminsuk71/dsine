@@ -96,7 +96,28 @@ contract DoubleSineMathTest is Test {
 
         uint256 out = DoubleSineMath.tokensOutForEth(virtualEth, ethIn);
 
-        assertEq(out, (K / virtualEth) - (K / (virtualEth + ethIn)), "large virtualEth token out");
+        uint256 oldVT = K / virtualEth;
+        uint256 newVT = _divUp(K, virtualEth + ethIn);
+        uint256 expectedOut = newVT >= oldVT ? 0 : oldVT - newVT;
+        assertEq(out, expectedOut, "large virtualEth token out");
+    }
+
+    function test_tokensOutForEth_roundsAgainstTraderWhenReserveNotDivisible() public pure {
+        uint256 newVE = V0 + 1;
+        uint256 floorOut = (K / V0) - (K / newVE);
+        uint256 conservativeOut = DoubleSineMath.tokensOutForEth(V0, 1);
+
+        assertGt(K % newVE, 0, "setup should require rounding");
+        assertEq(floorOut, conservativeOut + 1, "floor division overpays by one wei-token");
+    }
+
+    function test_ethOutForTokens_roundsAgainstTraderForDust() public pure {
+        uint256 oldVT = K / V0;
+        uint256 floorBasedOut = V0 - (K / (oldVT + 1));
+        uint256 conservativeOut = DoubleSineMath.ethOutForTokens(V0, 1);
+
+        assertEq(floorBasedOut, 1, "old formula paid one wei ETH");
+        assertEq(conservativeOut, 0, "dust token sell should not receive ETH");
     }
 
     function test_tokensOutForEth_revertsOnInvalidVirtualEth() public {
@@ -193,6 +214,10 @@ contract DoubleSineMathTest is Test {
             return;
         }
         require(diff * 10000 <= b * bpsTol, msg_);
+    }
+
+    function _divUp(uint256 numerator, uint256 denominator) internal pure returns (uint256) {
+        return numerator == 0 ? 0 : ((numerator - 1) / denominator) + 1;
     }
 }
 

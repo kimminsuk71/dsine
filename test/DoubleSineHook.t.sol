@@ -122,7 +122,7 @@ contract DoubleSineHookTest is Test {
 
     function test_buyA_advancesCurveAndMatchesFormula() public {
         uint256 ethIn = 0.01 ether;
-        uint256 ethCurve = (ethIn * (10000 - hook.BUY_FEE_BPS())) / 10000;
+        uint256 ethCurve = ethIn - _feeUp(ethIn, hook.BUY_FEE_BPS());
         uint256 v0 = hook.virtualEth();
         uint256 expectedTokenOut = DoubleSineMath.tokensOutForEth(v0, ethCurve);
 
@@ -138,7 +138,7 @@ contract DoubleSineHookTest is Test {
 
     function test_buyB_advancesCurveAndMatchesFormula() public {
         uint256 ethIn = 0.01 ether;
-        uint256 ethCurve = (ethIn * (10000 - hook.BUY_FEE_BPS())) / 10000;
+        uint256 ethCurve = ethIn - _feeUp(ethIn, hook.BUY_FEE_BPS());
         uint256 v0 = hook.virtualEth();
         uint256 expectedTokenOut = DoubleSineMath.tokensOutForEth(v0, ethCurve);
 
@@ -195,7 +195,7 @@ contract DoubleSineHookTest is Test {
         // After full round-trip, reserve should be close to fee retained:
         //   ~= ethIn * BUY_FEE_BPS/10000 + sell_fee_on_what_was_paid_back
         // Minimum: at least the buy fee. Maximum: a bit more from sell fee.
-        uint256 minExpected = (ethIn * hook.BUY_FEE_BPS()) / 10000;
+        uint256 minExpected = _feeUp(ethIn, hook.BUY_FEE_BPS());
         assertGt(hook.ethReserve(), reserveBefore + minExpected - 1, "reserve below buy-fee floor");
         // Reserve also can't exceed what was paid in (sells only return funds
         // that were already deposited).
@@ -321,7 +321,7 @@ contract DoubleSineHookTest is Test {
         uint256 managerBalanceBefore = tokenA.balanceOf(address(manager));
         uint256 userBalanceBefore = tokenA.balanceOf(user);
         uint256 ethIn = 0.01 ether;
-        uint256 ethCurve = (ethIn * (10000 - hook.BUY_FEE_BPS())) / 10000;
+        uint256 ethCurve = ethIn - _feeUp(ethIn, hook.BUY_FEE_BPS());
         uint256 expectedOut = DoubleSineMath.tokensOutForEth(hook.virtualEth(), ethCurve);
 
         _buyA(user, ethIn);
@@ -342,7 +342,7 @@ contract DoubleSineHookTest is Test {
         uint256 sellAmount = tokenA.balanceOf(user) / 2;
         uint256 userEthBefore = user.balance;
         uint256 ethGross = DoubleSineMath.ethOutForTokens(hook.virtualEth(), sellAmount);
-        uint256 expectedOut = ethGross - ((ethGross * hook.SELL_FEE_BPS()) / 10000);
+        uint256 expectedOut = ethGross - _feeUp(ethGross, hook.SELL_FEE_BPS());
 
         _sellA(user, sellAmount);
 
@@ -372,7 +372,7 @@ contract DoubleSineHookTest is Test {
         _buyA(user, 0.02 ether);
         uint256 sellAmount = tokenA.balanceOf(user) / 2;
         uint256 ethGross = DoubleSineMath.ethOutForTokens(hook.virtualEth(), sellAmount);
-        uint256 expectedOut = ethGross - ((ethGross * hook.SELL_FEE_BPS()) / 10000);
+        uint256 expectedOut = ethGross - _feeUp(ethGross, hook.SELL_FEE_BPS());
 
         uint256 forcedEth = 1 ether;
         vm.deal(address(hook), address(hook).balance + forcedEth);
@@ -383,6 +383,50 @@ contract DoubleSineHookTest is Test {
 
         assertEq(user.balance, userEthBefore + expectedOut, "sell payout must ignore forced ETH");
         assertEq(address(hook).balance, hook.ethReserve() + forcedEth, "forced ETH remains unbooked");
+    }
+
+    function test_sellDustRevertsBeforeRoundingCanPayOneWeiEth() public {
+        _buyA(user, 0.01 ether);
+        uint256 userTokenBefore = tokenA.balanceOf(user);
+        uint256 userEthBefore = user.balance;
+        uint256 reserveBefore = hook.ethReserve();
+        uint256 virtualEthBefore = hook.virtualEth();
+
+        bool reverted = _trySellA(user, 1);
+
+        assertTrue(reverted, "dust sell should revert");
+        assertEq(tokenA.balanceOf(user), userTokenBefore, "token balance changed");
+        assertEq(user.balance, userEthBefore, "eth balance changed");
+        assertEq(hook.ethReserve(), reserveBefore, "reserve changed");
+        assertEq(hook.virtualEth(), virtualEthBefore, "virtualEth changed");
+    }
+
+    function test_buyDustRevertsWhenCurveOutputRoundsToZero() public {
+        uint256 highVirtualEth = 1e30;
+        vm.store(address(hook), bytes32(uint256(3)), bytes32(highVirtualEth));
+
+        uint256 reserveBefore = hook.ethReserve();
+        uint256 userEthBefore = user.balance;
+
+        bool reverted = _tryBuyA(user, 1);
+
+        assertTrue(reverted, "zero-output buy should revert");
+        assertEq(hook.virtualEth(), highVirtualEth, "virtualEth changed");
+        assertEq(hook.ethReserve(), reserveBefore, "reserve changed");
+        assertEq(user.balance, userEthBefore, "eth balance changed");
+    }
+
+    function test_buyOneWeiRevertsBecauseRoundedFeeConsumesInput() public {
+        uint256 reserveBefore = hook.ethReserve();
+        uint256 virtualEthBefore = hook.virtualEth();
+        uint256 userEthBefore = user.balance;
+
+        bool reverted = _tryBuyA(user, 1);
+
+        assertTrue(reverted, "one-wei buy should revert");
+        assertEq(hook.virtualEth(), virtualEthBefore, "virtualEth changed");
+        assertEq(hook.ethReserve(), reserveBefore, "reserve changed");
+        assertEq(user.balance, userEthBefore, "eth balance changed");
     }
 
     function test_plainERC20_constructorCanPullApprovedTokens() public {
@@ -529,6 +573,12 @@ contract DoubleSineHookTest is Test {
         tokenA.burn(user, 1);
     }
 
+    function test_burn_revertsForNonHookSourceEvenWhenCalledByHook() public {
+        vm.prank(address(hook));
+        vm.expectRevert(DoubleSineToken.NotHook.selector);
+        tokenA.burn(user, 1);
+    }
+
     function test_transferFromZeroAddressRevertsEvenForZeroAmount() public {
         vm.prank(user, user);
         vm.expectRevert(DoubleSineToken.ZeroAddress.selector);
@@ -549,7 +599,7 @@ contract DoubleSineHookTest is Test {
 
     function test_slippage_buyPasses_whenMinTokensOutSatisfied() public {
         // Compute what we'd actually receive and ask for slightly less.
-        uint256 ethCurve = (0.01 ether * (10000 - hook.BUY_FEE_BPS())) / 10000;
+        uint256 ethCurve = 0.01 ether - _feeUp(0.01 ether, hook.BUY_FEE_BPS());
         uint256 expectedOut = DoubleSineMath.tokensOutForEth(hook.virtualEth(), ethCurve);
         uint256 minOut = (expectedOut * 99) / 100; // 1% slippage tolerance
         bool reverted = _tryBuyWithSlippage(user, 0.01 ether, minOut);
@@ -683,7 +733,7 @@ contract DoubleSineHookTest is Test {
         hook.beforeSwap(
             address(router),
             keyA,
-            SwapParams({zeroForOne: true, amountSpecified: _exactInput(2), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
+            SwapParams({zeroForOne: true, amountSpecified: _exactInput(3), sqrtPriceLimitX96: MIN_PRICE_LIMIT}),
             ""
         );
 
@@ -946,6 +996,11 @@ contract DoubleSineHookTest is Test {
         require(d <= maxDelta, msg_);
     }
 
+    function _feeUp(uint256 amount, uint256 bps) internal pure returns (uint256) {
+        if (amount == 0 || bps == 0) return 0;
+        return ((amount * bps) - 1) / 10000 + 1;
+    }
+
     /// Returns true if the buy reverted, false if it went through.
     /// Used to test the anti-sniper cap without relying on vm.expectRevert
     /// (the router's unlock-callback wrapping can confuse it).
@@ -971,6 +1026,22 @@ contract DoubleSineHookTest is Test {
         ) {
             return false;
         } catch {
+            return true;
+        }
+    }
+
+    function _trySellA(address seller, uint256 amount) internal returns (bool) {
+        vm.startPrank(seller, seller);
+        tokenA.approve(address(router), amount);
+        try router.swap(
+            keyA,
+            SwapParams({zeroForOne: false, amountSpecified: _exactInput(amount), sqrtPriceLimitX96: MAX_PRICE_LIMIT}),
+            ""
+        ) {
+            vm.stopPrank();
+            return false;
+        } catch {
+            vm.stopPrank();
             return true;
         }
     }

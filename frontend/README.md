@@ -1,33 +1,38 @@
 # DoubleSine Frontend
 
-Self-contained visualization for the DoubleSine price trajectory.
+Static trading console for the DoubleSine system.
 
 ## Run locally
 
-Just open `index.html` in a browser, or serve it:
+Open `index.html` directly in a browser, or serve it:
 
-```
+```bash
 python3 -m http.server 8000 --directory frontend
-# then visit http://localhost:8000
 ```
 
-No build step. Uses CDN-loaded Chart.js + ethers.js.
+No build step. The page uses CDN-loaded Chart.js and ethers.js, with a
+canvas fallback for the simulation charts if Chart.js is unavailable.
 
 ## Modes
 
-**Simulation** (default): in-browser state machine using the same math as
-`DoubleSineMath.sol`. Click `Buy A` / `Buy B` / `Sell A` / `Sell B` to
-advance theta and watch the lens-shaped intertwining emerge in both the
-time-series chart and the phase plot.
+**Simulation** is the default. It mirrors the on-chain curve math, including
+conservative rounding, rounded-up fees, zero-output rejection, shared
+`virtualEth`, and equal canonical hook prices for DSA and DSB.
 
-**Live**: call `connectLive(rpcUrl, hookAddress, hookAbi)` from the browser
-console (with the deployed hook's address + ABI). The page subscribes to
-`Buy` and `Sell` events and updates the charts in real time.
+**Live Read** connects to a deployed hook. Enter RPC URL and hook address in
+the page, or call:
 
-## What you should see
+```js
+connectLive(rpcUrl, hookAddress)
+```
 
-- Time series: priceA (red) and priceB (teal) trend upward, interlocking
-  like a DNA double helix viewed from the side.
-- Phase plot: trajectory point traces a sinusoid drifting diagonally up
-  through (priceA, priceB) space. The "tilted sine wave on 45-degree
-  axes" the design targets.
+The page reads `virtualEth` / `ethReserve`, subscribes to `Buy` and `Sell`
+events, and keeps the console charts and event table current.
+
+## Market model
+
+- Canonical ETH/DSA and ETH/DSB v4 pools are locked by the shared hook state.
+- DSA and DSB remain plain transferable ERC20s for wallets, GMGN-style routes,
+  DEX pools, custody, and other external venues.
+- External venues can exist, but their reserves are independent from the
+  canonical hook unless their route trades through the v4 PoolManager path.

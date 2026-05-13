@@ -150,11 +150,12 @@ contract AtomicDoubleSineDeployer {
     error ZeroAddress();
     error FirstBuyTooLarge();
     error InsufficientEth();
+    error IncorrectEth();
     error HookAddressMismatch();
+    error ExpectedHookRequired();
     error UnexpectedInitialTick();
     error FirstBuyFailed();
     error TokenTransferFailed();
-    error EthTransferFailed();
     error OnlyOwner();
     error AlreadyLaunched();
     error BeneficiaryMustBeOwner();
@@ -176,7 +177,9 @@ contract AtomicDoubleSineDeployer {
         if (launched) revert AlreadyLaunched();
         launched = true;
         if (params.firstBuyWei > ANTI_SNIPE_MAX_BUY_WEI) revert FirstBuyTooLarge();
+        if (params.expectedHook == address(0)) revert ExpectedHookRequired();
         if (msg.value < params.firstBuyWei * 2) revert InsufficientEth();
+        if (msg.value != params.firstBuyWei * 2) revert IncorrectEth();
 
         DoubleSineRouter router = new DoubleSineRouter(IPoolManager(params.poolManager));
 
@@ -186,7 +189,7 @@ contract AtomicDoubleSineDeployer {
         DoubleSineHook hook = new DoubleSineHook{salt: params.hookSalt}(
             IPoolManager(params.poolManager), address(router), tokenA, tokenB, address(this)
         );
-        if (params.expectedHook != address(0) && address(hook) != params.expectedHook) revert HookAddressMismatch();
+        if (address(hook) != params.expectedHook) revert HookAddressMismatch();
 
         router.bindSystem(tokenA, tokenB, address(hook));
         tokenA.bindHook(address(hook));
@@ -235,9 +238,6 @@ contract AtomicDoubleSineDeployer {
             if (balanceB > 0 && !tokenB.transfer(params.beneficiary, balanceB)) revert TokenTransferFailed();
         }
 
-        uint256 refund = msg.value - params.firstBuyWei * 2;
-        if (refund > 0) _sendETH(msg.sender, refund);
-
         deployment = Deployment({
             router: address(router), tokenA: address(tokenA), tokenB: address(tokenB), hook: address(hook)
         });
@@ -245,11 +245,5 @@ contract AtomicDoubleSineDeployer {
         emit Launched(
             params.beneficiary, address(router), address(tokenA), address(tokenB), address(hook), params.firstBuyWei
         );
-    }
-
-    function _sendETH(address to, uint256 amount) internal {
-        // slither-disable-next-line low-level-calls
-        (bool ok,) = to.call{value: amount}("");
-        if (!ok) revert EthTransferFailed();
     }
 }

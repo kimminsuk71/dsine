@@ -114,6 +114,10 @@ contract DoubleSineToken {
     }
 
     function burn(address from, uint256 amount) external onlyHook {
+        // Sells settle tokens into the hook first, then burn from hook
+        // custody. Keep burn authority symmetric with mint authority so the
+        // hook cannot ever claw back tokens from users or external venues.
+        if (from != hook) revert NotHook();
         uint256 balance = balanceOf[from];
         if (balance < amount) revert InsufficientBalance();
         unchecked {

@@ -27,7 +27,8 @@ Twin-token system on Uniswap v4: two plain ERC20s (**DSA** and **DSB**) whose ca
 - **Pump-style bonding curve** — single shared virtual reserve drives pricing; parabolic shape (flat at start, steeper as inflows accumulate).
 - **Anti-sniper window** — first 5 blocks after init cap per-swap buys at 0.001 ETH on both pools.
 - **No LP risk** — the hook *is* the AMM; `addLiquidity` reverts.
-- **Reserve permanent** — every swap takes a 1% fee on each side; the reserve cannot drain below accumulated fees.
+- **Reserve permanent** — every nonzero swap pays a rounded-up 1% fee on each side; the reserve cannot drain below accumulated fees.
+- **Dust-safe rounding** — curve output rounds against traders and zero-output swaps revert instead of silently settling dust.
 - **Slippage protection** — optional `minOut` in `hookData = abi.encode(uint256)`.
 
 ## Layout
@@ -49,8 +50,8 @@ script/
 └── utils/HookMiner.sol      CREATE2 salt miner for hook permission bits
 
 frontend/
-├── index.html               self-contained simulation + chart visualization
-└── README.md                how to run the local visualizer
+├── index.html               self-contained trading console + live hook read
+└── README.md                how to run the local console
 ```
 
 ## Setup
@@ -66,7 +67,7 @@ forge build
 forge test
 ```
 
-You should see **86 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **84 tests passing**:
+You should see **94 tests passing** across three suites. The CI-style command excludes the two trajectory dump tests and should report **92 tests passing**:
 
 ```bash
 forge test -vv --no-match-test "test_emitTrajectory|test_trajectory"
@@ -100,14 +101,14 @@ forge script script/DeployDoubleSine.s.sol \
 
 ## Frontend
 
-Local visualizer (simulation mode, no contract needed):
+Local console (simulation mode, no contract needed):
 
 ```bash
 python3 -m http.server 8000 --directory frontend
 # open http://localhost:8000
 ```
 
-For live mode (after deploying), call `connectLive(rpcUrl, hookAddress, hookAbi)` in the dev console. It subscribes to `Buy` and `Sell` events and updates the chart in real time.
+For live mode after deploying, enter the RPC URL and hook address in the page or call `connectLive(rpcUrl, hookAddress)` in the dev console. It reads hook state, subscribes to `Buy` and `Sell` events, and updates the charts and event table in real time.
 
 ## What it can and can't do
 
@@ -139,15 +140,17 @@ DSA/DSB are standard transferable ERC20s, so aggregators and GMGN-style routers 
 - **Open canonical v4 swaps**: canonical hook swaps accept arbitrary PoolManager callers for the canonical PoolKeys. This allows third-party v4 routers while relying on PoolManager settlement invariants.
 - **Orphan balance handling**: direct token transfers to PoolManager or the hook are allowed at the ERC20 layer, but canonical buy/sell settlement syncs before transferring and preserves orphan balances instead of counting them as swap input.
 - **Launcher binding**: `launch` is owner-only, one-shot, and the first-buy beneficiary must be the owner.
+- **Launch exactness**: `launch` requires the pre-mined expected hook address and exact ETH for the two first-buys; it has no refund path.
 - **Direct ETH guard**: router and launcher reject raw ETH transfers; hook only accepts ETH sent by PoolManager settlement, keeping reserve accounting from being externally polluted.
 - **Forced ETH isolation**: ETH forced into the hook is not added to `ethReserve`, so sell payouts remain bounded by bookkept reserve rather than raw balance.
 - **System address guard**: PoolManager, router, token, and hook addresses must already have deployed code before they can be bound.
 - **Launcher ownership**: the atomic launcher can only be executed by its deployer, preventing a public-mempool caller from front-running `launch` and taking the first-buy allocation.
 - **Exact-input bounds**: swap entrypoints explicitly reject `type(int256).min` amount values instead of relying on arithmetic panic behavior.
-- **Curve math bounds**: spot price checks its safe multiplication domain before squaring, buy math avoids large intermediate products, and invalid virtual-reserve domains revert with explicit errors.
+- **Curve math bounds**: spot price checks its safe multiplication domain before squaring, buy math avoids large intermediate products, curve outputs round against the trader, and invalid virtual-reserve domains revert with explicit errors.
+- **Dust protection**: hook swaps reject zero-output buys/sells, and trader-side fees round up so input splitting cannot bypass the 1% fee.
 - **v4 delta bounds**: hook swaps reject amounts that cannot fit in v4 `int128` balance deltas before state changes or settlement.
 - **Initial pool price guard**: canonical v4 pools must initialize at 1:1 tick 0, so the registered pool state cannot drift from deployment assumptions or external indexer expectations.
-- **Mint authority**: `onlyHook` modifier + target check (`to == hook`) — even a buggy hook can't mint to arbitrary addresses.
+- **Mint/burn authority**: `onlyHook` modifier plus hook-custody source/target checks — even a buggy hook can't mint to or burn from arbitrary addresses.
 - **Reserve invariant**: `address(hook).balance == ethReserve` for clean trading paths. Direct ETH transfers to the hook are rejected unless they come from PoolManager settlement.
 - **Anti-sniper**: 5-block window enforces 0.001 ETH cap on per-swap buys. Both pools share one bootstrap anchor.
 - **CREATE2 mining**: the hook address self-encodes its permission flags, verified by Uniswap's `Hooks.validateHookPermissions` in the constructor.

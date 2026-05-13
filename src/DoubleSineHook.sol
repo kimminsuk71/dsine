@@ -102,6 +102,7 @@ contract DoubleSineHook is IHooks {
     error SystemAddressMustHaveCode();
     error InvalidInitialPrice();
     error DirectEthDisabled();
+    error ZeroOutput();
 
     constructor(
         IPoolManager manager_,
@@ -280,7 +281,7 @@ contract DoubleSineHook is IHooks {
 
         // Skim buy fee outside the curve. The remaining ethCurve enters
         // the constant-product reserve and determines tokensOut.
-        uint256 fee = (ethIn * BUY_FEE_BPS) / 10000;
+        uint256 fee = _feeUp(ethIn, BUY_FEE_BPS);
         uint256 ethCurve = ethIn - fee;
         if (
             virtualEth > DoubleSineMath.MAX_SPOT_PRICE_VIRTUAL_ETH
@@ -290,6 +291,7 @@ contract DoubleSineHook is IHooks {
         }
 
         uint256 tokenOut = DoubleSineMath.tokensOutForEth(virtualEth, ethCurve);
+        if (tokenOut == 0) revert ZeroOutput();
         if (tokenOut > uint256(uint128(type(int128).max))) revert Int128Overflow();
         if (tokenOut < minTokensOut) revert Slippage();
         virtualEth += ethCurve;
@@ -314,8 +316,10 @@ contract DoubleSineHook is IHooks {
         if (tokenIn > uint256(uint128(type(int128).max))) revert Int128Overflow();
         // Curve gives the gross ETH for these tokens at current state.
         uint256 ethGross = DoubleSineMath.ethOutForTokens(virtualEth, tokenIn);
-        uint256 fee = (ethGross * SELL_FEE_BPS) / 10000;
+        if (ethGross == 0) revert ZeroOutput();
+        uint256 fee = _feeUp(ethGross, SELL_FEE_BPS);
         uint256 ethOut = ethGross - fee;
+        if (ethOut == 0) revert ZeroOutput();
         if (ethOut > uint256(uint128(type(int128).max))) revert Int128Overflow();
         if (ethOut < minEthOut) revert Slippage();
 
@@ -427,5 +431,10 @@ contract DoubleSineHook is IHooks {
         if (v > uint256(uint128(type(int128).max))) revert Int128Overflow();
         // forge-lint: disable-next-line(unsafe-typecast)
         return -int128(int256(v));
+    }
+
+    function _feeUp(uint256 amount, uint256 bps) internal pure returns (uint256) {
+        if (amount == 0 || bps == 0) return 0;
+        return ((amount * bps) - 1) / 10000 + 1;
     }
 }

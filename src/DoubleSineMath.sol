@@ -56,24 +56,35 @@ library DoubleSineMath {
 
     /// Tokens minted out for ethIn pushed into the curve.
     ///   tokensOut = oldVirtualTokens - newVirtualTokens
-    ///             = K/virtualEth - K/(virtualEth + ethIn)
+    ///             = floor(K/virtualEth) - ceil(K/(virtualEth + ethIn))
+    ///
+    /// The second division rounds up so integer dust cannot overpay the
+    /// trader by one wei-token when K is not evenly divisible by newVE.
     function tokensOutForEth(uint256 virtualEth, uint256 ethIn) internal pure returns (uint256) {
         if (virtualEth == 0) revert InvalidVirtualEth();
         if (ethIn > type(uint256).max - virtualEth) revert VirtualEthOverflow();
+        if (ethIn == 0) return 0;
         uint256 newVE = virtualEth + ethIn;
-        return (K / virtualEth) - (K / newVE);
+        uint256 oldVT = K / virtualEth;
+        uint256 newVT = _divUp(K, newVE);
+        if (newVT >= oldVT) return 0;
+        return oldVT - newVT;
     }
 
     /// ETH paid out for tokensIn burned from the curve.
     ///   ethOut = virtualEth - newVirtualEth
-    ///          = virtualEth - K/(K/virtualEth + tokensIn)
+    ///          = virtualEth - ceil(K/(floor(K/virtualEth) + tokensIn))
+    ///
+    /// The final virtualEth rounds up so token dust cannot claim one wei
+    /// of ETH when its exact curve value is below one wei.
     function ethOutForTokens(uint256 virtualEth, uint256 tokensIn) internal pure returns (uint256) {
         if (virtualEth == 0) revert InvalidVirtualEth();
         if (tokensIn == 0) return 0;
         uint256 oldVT = K / virtualEth;
         if (tokensIn > type(uint256).max - oldVT) revert VirtualTokenOverflow();
         uint256 newVT = oldVT + tokensIn;
-        uint256 newVE = K / newVT;
+        uint256 newVE = _divUp(K, newVT);
+        if (newVE >= virtualEth) return 0;
         return virtualEth - newVE;
     }
 
@@ -85,5 +96,9 @@ library DoubleSineMath {
 
     function priceB(uint256 virtualEth) internal pure returns (uint256) {
         return spotPrice(virtualEth);
+    }
+
+    function _divUp(uint256 numerator, uint256 denominator) private pure returns (uint256) {
+        return numerator == 0 ? 0 : ((numerator - 1) / denominator) + 1;
     }
 }

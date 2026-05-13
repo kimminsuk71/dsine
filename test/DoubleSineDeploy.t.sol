@@ -284,6 +284,51 @@ contract DoubleSineDeployTest is Test {
         );
     }
 
+    function test_atomicLaunchRequiresExpectedHook() public {
+        PoolManager manager = new PoolManager(address(this));
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+
+        vm.expectRevert(AtomicDoubleSineDeployer.ExpectedHookRequired.selector);
+        launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                beneficiary: address(this),
+                hookSalt: bytes32(0),
+                expectedHook: address(0),
+                firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
+            })
+        );
+    }
+
+    function test_atomicLaunchRejectsIncorrectEth() public {
+        PoolManager manager = new PoolManager(address(this));
+        AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
+
+        address predictedRouter = vm.computeCreateAddress(address(launcher), 1);
+        address predictedTokenA = vm.computeCreateAddress(address(launcher), 2);
+        address predictedTokenB = vm.computeCreateAddress(address(launcher), 3);
+        bytes memory ctorArgs = abi.encode(
+            IPoolManager(address(manager)),
+            predictedRouter,
+            DoubleSineToken(predictedTokenA),
+            DoubleSineToken(predictedTokenB),
+            address(launcher)
+        );
+        (address expectedHook, bytes32 salt) =
+            HookMiner.find(address(launcher), HOOK_FLAGS, type(DoubleSineHook).creationCode, ctorArgs);
+
+        vm.expectRevert(AtomicDoubleSineDeployer.IncorrectEth.selector);
+        launcher.launch{value: ANTI_SNIPE_MAX_BUY_WEI * 2 + 1}(
+            AtomicDoubleSineDeployer.LaunchParams({
+                poolManager: address(manager),
+                beneficiary: address(this),
+                hookSalt: salt,
+                expectedHook: expectedHook,
+                firstBuyWei: ANTI_SNIPE_MAX_BUY_WEI
+            })
+        );
+    }
+
     function test_atomicLaunchCanOnlyRunOnce() public {
         PoolManager manager = new PoolManager(address(this));
         AtomicDoubleSineDeployer launcher = new AtomicDoubleSineDeployer();
